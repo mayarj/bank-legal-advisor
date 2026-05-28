@@ -1,0 +1,44 @@
+# Core framework & server
+fastapi==0.115.11
+uvicorn[standard]==0.34.0
+
+# Agentic AI & RAG
+langgraph==0.2.70
+langchain==0.3.14
+langchain-community==0.3.14
+
+# LLM (Claude API)
+anthropic==0.45.0
+langchain-anthropic==0.3.4
+
+# Model Context Protocol (MCP SDK)
+mcp==1.2.0
+
+# Embeddings
+sentence-transformers==3.3.1
+
+# Vector Store
+chromadb==0.5.23
+
+# Document Parsing
+PyMuPDF==1.24.14
+pdfplumber==0.11.4
+
+# Database
+psycopg2-binary==2.9.10  # used by Alembic migrations (sync)
+asyncpg==0.30.0           # used by SQLAlchemy at runtime (async)
+SQLAlchemy==2.0.36
+
+# Validation & settings
+pydantic==2.10.5
+pydantic-settings==2.7.0
+python-dotenv==1.0.1
+
+# Testing
+pytest==8.3.4
+pytest-asyncio==0.25.0
+httpx==0.28.1  # for testing FastAPI endpoints
+aiosqlite==0.20.0  # async SQLite driver for graph tests
+
+# Optional utilities
+typing-extensions==4.12.2  # for better type hints support

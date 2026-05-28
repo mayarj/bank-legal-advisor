@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Optional
 
 import chromadb
 
@@ -11,6 +12,27 @@ _collection = _client.get_or_create_collection(
     name=settings.chroma_collection,
     metadata={"hnsw:space": "cosine"},
 )
+
+
+@dataclass
+class ArticleResult:
+    legislation_code: str
+    article_number: str
+    content: str
+    subject: str
+    status: str
+    issuer: str
+    date: str
+
+
+@dataclass
+class LegislationResult:
+    code: str
+    subject: str
+    status: str
+    issuer: str
+    date: str
+    articles: dict[str, str]  # article_number → content
 
 
 @dataclass
@@ -28,15 +50,12 @@ def add_legislation(legislation: Legislation) -> None:
     if not legislation.articles:
         return
 
-    ids, documents, embeddings, metadatas = [], [], [], []
+    ids, documents, metadatas = [], [], []
 
     for article_number, content in legislation.articles.items():
         article_id = f"{legislation.code}_article_{article_number}"
-        text_to_embed = f"{legislation.subject} | Article {article_number}: {content}"
-
         ids.append(article_id)
         documents.append(content)
-        embeddings.append(None)  # filled in batch below
         metadatas.append({
             "legislation_code": legislation.code,
             "article_number": article_number,
@@ -46,11 +65,10 @@ def add_legislation(legislation: Legislation) -> None:
             "date": legislation.date.isoformat(),
         })
 
-    texts_to_embed = [
+    batch_embeddings = embed_batch([
         f"{legislation.subject} | Article {num}: {content}"
         for num, content in legislation.articles.items()
-    ]
-    batch_embeddings = embed_batch(texts_to_embed)
+    ])
 
     _collection.upsert(
         ids=ids,
@@ -88,6 +106,53 @@ def search(
         ))
 
     return output
+
+
+def get_article(legislation_code: str, article_number: str) -> Optional[ArticleResult]:
+    article_id = f"{legislation_code}_article_{article_number}"
+    result = _collection.get(
+        ids=[article_id],
+        include=["documents", "metadatas"],
+    )
+
+    if not result["ids"]:
+        return None
+
+    meta = result["metadatas"][0]
+    return ArticleResult(
+        legislation_code=meta["legislation_code"],
+        article_number=meta["article_number"],
+        content=result["documents"][0],
+        subject=meta["subject"],
+        status=meta["status"],
+        issuer=meta["issuer"],
+        date=meta["date"],
+    )
+
+
+def get_legislation(legislation_code: str) -> Optional[LegislationResult]:
+    result = _collection.get(
+        where={"legislation_code": legislation_code},
+        include=["documents", "metadatas"],
+    )
+
+    if not result["ids"]:
+        return None
+
+    meta = result["metadatas"][0]
+    articles = {
+        m["article_number"]: doc
+        for m, doc in zip(result["metadatas"], result["documents"])
+    }
+
+    return LegislationResult(
+        code=meta["legislation_code"],
+        subject=meta["subject"],
+        status=meta["status"],
+        issuer=meta["issuer"],
+        date=meta["date"],
+        articles=articles,
+    )
 
 
 def delete_legislation(legislation_code: str) -> None:

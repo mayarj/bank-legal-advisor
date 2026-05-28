@@ -19,5 +19,9 @@ class Settings(BaseSettings):
     chroma_path: str = "./data/chromadb"
     chroma_collection: str = "legislation_articles"
 
+    max_critique_retries: int = 2
+    graph_k_depth: int = 2
+    similarity_n_results: int = 5
+
 
 settings = Settings()

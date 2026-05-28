@@ -6,7 +6,16 @@ from src.db.schemas import LegislationStatus, RelationshipType
 from src.rag.embeddings import embed, embed_batch
 from src.rag.graph import format_for_llm, get_children, get_parents
 from src.rag.retriever import retrieve, retrieve_active
-from src.rag.vectorstore import SearchResult, add_legislation, delete_legislation, search
+from src.rag.vectorstore import (
+    ArticleResult,
+    LegislationResult,
+    SearchResult,
+    add_legislation,
+    delete_legislation,
+    get_article,
+    get_legislation,
+    search,
+)
 from tests.conftest import make_relationship
 
 
@@ -125,6 +134,76 @@ class TestVectorstore:
         add_legislation(sample_legislation)
 
         assert test_collection.count() == 0
+
+
+# ── Direct lookup ─────────────────────────────────────────────────────────────
+
+class TestGetArticle:
+
+    def test_returns_article_result_for_existing_article(self, test_collection, sample_legislation):
+        add_legislation(sample_legislation)
+
+        result = get_article("LAW-88-2003", "2")
+
+        assert isinstance(result, ArticleResult)
+        assert result.legislation_code == "LAW-88-2003"
+        assert result.article_number == "2"
+        assert result.content == sample_legislation.articles["2"]
+
+    def test_returns_correct_metadata(self, test_collection, sample_legislation):
+        add_legislation(sample_legislation)
+
+        result = get_article("LAW-88-2003", "1")
+
+        assert result.subject == sample_legislation.subject
+        assert result.status == "active"
+        assert result.issuer == "Central Bank"
+
+    def test_returns_none_for_missing_article(self, test_collection, sample_legislation):
+        add_legislation(sample_legislation)
+
+        result = get_article("LAW-88-2003", "99")
+
+        assert result is None
+
+    def test_returns_none_for_missing_legislation(self, test_collection):
+        result = get_article("NON-EXISTENT", "1")
+
+        assert result is None
+
+
+class TestGetLegislation:
+
+    def test_returns_legislation_result_for_existing_code(self, test_collection, sample_legislation):
+        add_legislation(sample_legislation)
+
+        result = get_legislation("LAW-88-2003")
+
+        assert isinstance(result, LegislationResult)
+        assert result.code == "LAW-88-2003"
+
+    def test_returns_all_articles(self, test_collection, sample_legislation):
+        add_legislation(sample_legislation)
+
+        result = get_legislation("LAW-88-2003")
+
+        assert set(result.articles.keys()) == set(sample_legislation.articles.keys())
+        assert result.articles["1"] == sample_legislation.articles["1"]
+        assert result.articles["2"] == sample_legislation.articles["2"]
+
+    def test_returns_correct_metadata(self, test_collection, sample_legislation):
+        add_legislation(sample_legislation)
+
+        result = get_legislation("LAW-88-2003")
+
+        assert result.subject == sample_legislation.subject
+        assert result.status == "active"
+        assert result.issuer == "Central Bank"
+
+    def test_returns_none_for_missing_legislation(self, test_collection):
+        result = get_legislation("NON-EXISTENT")
+
+        assert result is None
 
 
 # ── Retriever ─────────────────────────────────────────────────────────────────

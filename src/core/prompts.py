@@ -28,7 +28,6 @@ def legislation_extraction_prompt(legislation_txt: str) -> tuple[str, str]:
 
     return system_msg, prompt
 
-
 def relationship_extraction_prompt(legislation_txt: str) -> tuple[str, str]:
     system_msg = """
     You are a data extraction specialist for Legislative Relationships. Your task is to extract structured relationship data from legislation content and output valid JSON.
@@ -62,7 +61,6 @@ def relationship_extraction_prompt(legislation_txt: str) -> tuple[str, str]:
 
     return system_msg, prompt
 
-
 def query_rewrite_prompt(query: str) -> tuple[str, str]:
     system_msg = """
     You are a legal search query specialist. Your job is to rewrite a user's natural language question
@@ -85,7 +83,6 @@ def query_rewrite_prompt(query: str) -> tuple[str, str]:
     """
 
     return system_msg, prompt
-
 
 def json_auto_repair_prompt(response: str, error_message: str) -> tuple[str, str]:
     system_msg = """
@@ -119,3 +116,252 @@ def json_auto_repair_prompt(response: str, error_message: str) -> tuple[str, str
     """
 
     return system_msg, prompt
+
+def search_planning_prompt(user_query, context=None):
+    base_system_msg = """
+    You are a Legislative Search Planning Specialist. Your task is to analyze a user's query about legislation and create a structured search plan.
+    Follow these rules:
+    1. Always output ONLY valid JSON - no additional text or explanations
+    2. Analyze the query and extract:
+        - primary_intent: string - main goal of the search (e.g., "find_amendments", "trace_historical_changes", "find_exceptions", "check_conflicts", "find_implementing_regulations")
+        - target_legislation: string or null - specific law/act being asked about
+        - target_articles: list of strings - specific articles mentioned (if any)
+        - relationship_types_to_search: list of strings - relevant relationship types to look for (e.g., ["amends", "repeals", "exceptions", "supersedes", "references"])
+        - temporal_constraints: object or null - time-based filters like {"effective_from": "2020-01-01", "effective_to": "2025-12-31"}
+        - jurisdiction_filters: list of strings - geographic or authority limits (e.g., ["federal", "california", "EU"])
+        - search_keywords: list of strings - key terms extracted from query
+        - suggested_search_queries: list of strings - 2-3 alternative search queries to try
+    
+    3. For missing fields, use null or empty lists as appropriate
+    4. Consider both direct and indirect relationships (e.g., if looking for exceptions, also consider amendments that create exceptions)
+    """
+    
+    context_section = f"\nAdditional context: {context}" if context else ""
+    
+    base_user_prompt = f"""
+    Create a structured search plan for this legislative query:
+    
+    USER QUERY: {user_query}{context_section}
+    
+    Output JSON with these exact keys:
+    primary_intent, target_legislation, target_articles, relationship_types_to_search, 
+    temporal_constraints, jurisdiction_filters, search_keywords, suggested_search_queries
+    
+    Output only valid JSON.
+    """
+    
+    return base_system_msg, base_user_prompt
+
+def detailed_relationship_extraction_prompt(relationship_text, extraction_goals=None):
+    base_system_msg = """
+    You are a Legislative Relationship Extraction Specialist. Your task is to extract specific relationship data from legislative text according to defined goals.
+    Follow these rules:
+    1. Always output ONLY valid JSON - no additional text or explanations
+    2. Extract the following fields for EACH relationship found:
+        - type: string - relationship type (amends, repeals, supersedes, exceptions, references, implements, conflicts_with, interprets)
+        - confidence: float - confidence score from 0.0 to 1.0
+        - source_text: string - exact text snippet containing the relationship
+        - start_index: int - character position where relationship starts
+        - end_index: int - character position where relationship ends
+        
+        - father_legislation: object
+          - name: string - full name of source legislation
+          - abbreviation: string or null - common abbreviation
+          - article: string or null - specific article number
+          - section: string or null - specific section if different from article
+          - paragraph: string or null - specific paragraph
+          - version: string or null - version/date if specified
+          
+        - affected_legislation: object
+          - name: string - full name of target legislation
+          - abbreviation: string or null
+          - article: string or null
+          - section: string or null
+          - paragraph: string or null
+          - version: string or null
+          
+        - relationship_details: object
+          - action: string - what happens (e.g., "modifies", "deletes", "adds", "creates_exception")
+          - scope: string - extent of impact ("full", "partial", "specific_provision")
+          - effective_date: string or null - when relationship becomes active
+          - termination_date: string or null - if relationship expires
+          - conditions: list of strings - conditions for applicability
+          - limitations: list of strings - limitations on the relationship
+          
+        - cross_references: list of objects
+          - references_other_legislation: list of strings - other laws mentioned
+          - cites_precedent: string or null - any legal precedent cited
+          
+        - metadata: object
+          - extraction_timestamp: string - ISO format timestamp
+          - relationship_id: string - unique ID for this relationship
+          - is_explicit: boolean - whether relationship is explicitly stated
+          - inferred_from_context: boolean - whether inferred from surrounding text
+    
+    3. If extraction_goals are provided, prioritize fields matching those goals
+    4. For missing fields, use null or empty lists/objects as appropriate
+    5. Capture multiple relationships if they exist in the text
+    """
+    
+    goals_section = ""
+    if extraction_goals:
+        goals_section = f"\nEXTRACTION GOALS (prioritize these fields): {', '.join(extraction_goals)}"
+    
+    base_user_prompt = f"""
+    Extract all legislative relationships from the text below.{goals_section}
+    
+    TEXT TO ANALYZE:
+    {relationship_text}
+    
+    Output an array of relationship objects with the complete schema specified in the system message.
+    If no relationships found, output an empty array: []
+    
+    Output only valid JSON.
+    """
+    
+    return base_system_msg, base_user_prompt
+
+def legal_agent_system_prompt() -> str:
+    return """You are a specialized legal advisor for banking and financial legislation.
+You have access to a database of legislation articles and their relationships.
+
+Your responsibilities:
+- Answer questions about banking law, compliance, and loan regulations
+- Cite specific articles and legislation codes in every answer
+- Apply only legislation that is currently in effect (status: active)
+- When a relationship condition (illustration) does not match the user's situation, exclude that legislation
+- Be precise: if you are uncertain, say so and ask for clarification
+
+Always structure your final answer as:
+1. Direct answer to the question
+2. Legal basis: list of articles cited (legislation code + article number)
+3. Caveats: any conditions, exceptions, or limitations that apply"""
+
+
+def synthesis_prompt(
+    query: str,
+    articles_context: str,
+    relationship_context: str,
+    critique_feedback: str = "",
+) -> tuple[str, str]:
+    feedback_section = f"\n\nPREVIOUS CRITIQUE TO ADDRESS:\n{critique_feedback}" if critique_feedback else ""
+
+    system_msg = legal_agent_system_prompt()
+
+    prompt = f"""Answer the following legal question using ONLY the provided articles and relationship context.
+
+QUESTION: {query}
+
+RETRIEVED ARTICLES:
+{articles_context}
+
+RELATED LEGISLATION (via graph traversal):
+{relationship_context}
+{feedback_section}
+
+Provide a complete answer with article citations."""
+
+    return system_msg, prompt
+
+
+def critique_prompt(query: str, draft_answer: str) -> tuple[str, str]:
+    system_msg = """You are a legal answer quality reviewer. Evaluate whether the provided answer
+fully and accurately addresses the legal question using the cited articles.
+
+Output ONLY valid JSON with this structure:
+{
+  "passed": boolean,
+  "missing_aspects": list of strings,
+  "feedback": string
+}
+
+passed = true only if ALL of these hold:
+- The question is directly answered
+- Every claim is backed by a cited article
+- No relevant aspect of the question is left unaddressed
+- No legislation is applied outside its stated conditions"""
+
+    prompt = f"""QUESTION: {query}
+
+DRAFT ANSWER:
+{draft_answer}
+
+Evaluate this answer and output JSON."""
+
+    return system_msg, prompt
+
+
+def evaluate_relationships_prompt(query: str, relationship_context: str) -> tuple[str, str]:
+    system_msg = """You are a legal relevance evaluator. Given a user question and a list of
+related legislation (with conditions), decide which legislation is relevant to retrieve
+and whether child legislation needs to be checked.
+
+Output ONLY valid JSON with this structure:
+{
+  "legislations_to_retrieve": list of legislation codes (strings),
+  "needs_children": boolean,
+  "reasoning": string
+}
+
+For each relationship in the context, read its condition (illustration).
+Include the legislation ONLY if its condition applies to the user's situation.
+Set needs_children=true if any retrieved legislation likely has implementing
+regulations or exceptions that could affect the answer."""
+
+    prompt = f"""QUESTION: {query}
+
+RELATED LEGISLATION:
+{relationship_context}
+
+Decide which legislation to retrieve and output JSON."""
+
+    return system_msg, prompt
+
+
+def complete_search_extraction_pipeline_prompt(user_query, legislation_text_to_search):
+    base_system_msg = """
+    You are a Legislative Search and Extraction Specialist. Your task is to:
+    1. Analyze a user query to determine what legislative relationships to look for
+    2. Search through the provided legislation text
+    3. Extract all relevant relationships matching the query intent
+    
+    Follow these rules:
+    1. Always output ONLY valid JSON - no additional text or explanations
+    2. First, interpret the user's intent and create search parameters
+    3. Then, identify all relationship instances in the text that match these parameters
+    4. Extract each relationship with complete details
+    """
+    
+    base_user_prompt = f"""
+    USER QUERY: {user_query}
+    
+    LEGISLATION TEXT TO SEARCH:
+    {legislation_text_to_search}
+    
+    Output JSON with:
+    {{
+        "search_plan": {{
+            "primary_intent": "string",
+            "relationship_types_sought": ["string"],
+            "key_terms": ["string"]
+        }},
+        "found_relationships": [
+            {{
+                "type": "string",
+                "father_legislation": {{"name": "string", "article": "string or null"}},
+                "affected_legislation": {{"name": "string", "article": "string or null"}},
+                "illustration": "string - conditions/applicability",
+                "relevance_to_query": "string - explanation of why this matches user intent"
+            }}
+        ],
+        "summary": {{
+            "total_found": "int",
+            "query_answered": "boolean",
+            "suggested_follow_up": "string or null"
+        }}
+    }}
+    
+    Output only valid JSON.
+    """
+    
+    return base_system_msg, base_user_prompt

@@ -38,12 +38,19 @@ CRITIQUE_FAIL_JSON = json.dumps({
 def tools_and_map():
     """Mock tools with sensible defaults for the no-parent-context path."""
     tool_map = {}
-    for name in ["similarity_search", "get_article_data", "get_legislation_data", "get_relationship_map"]:
+    for name in [
+        "hybrid_search_legislation", "exact_word_search",
+        "get_article_data", "get_legislation_data", "get_relationship_map",
+    ]:
         m = MagicMock()
         m.name = name
         tool_map[name] = m
 
-    tool_map["similarity_search"].invoke.return_value = SEARCH_RESULTS_TEXT
+    tool_map["hybrid_search_legislation"].invoke.return_value = SEARCH_RESULTS_TEXT
+    # Default: no exact matches so exact results don't affect article ref parsing
+    tool_map["exact_word_search"].invoke.side_effect = lambda args: (
+        f"No active articles found containing '{args['keyword']}'."
+    )
     tool_map["get_article_data"].invoke.return_value = ARTICLE_TEXT
     tool_map["get_legislation_data"].invoke.return_value = "Full legislation content."
     # Returns the sentinel that makes traverse_parents skip adding to parent_sections,
@@ -105,14 +112,25 @@ class TestAgentHappyPath:
         assert result["critique_passed"] is True
 
     @patch("src.agents.legal_agent.invoke")
-    async def test_similarity_search_tool_is_called(self, mock_invoke, tools_and_map):
+    async def test_hybrid_search_tool_is_called(self, mock_invoke, tools_and_map):
         tools, tool_map = tools_and_map
         mock_invoke.side_effect = [VALID_PLAN_JSON, "Answer.", CRITIQUE_PASS_JSON]
         agent = build_legal_agent(tools)
 
         await agent.ainvoke({"query": "loan requirements", "messages": []})
 
-        tool_map["similarity_search"].invoke.assert_called_once()
+        tool_map["hybrid_search_legislation"].invoke.assert_called_once()
+
+    @patch("src.agents.legal_agent.invoke")
+    async def test_exact_word_search_called_for_plan_keywords(self, mock_invoke, tools_and_map):
+        tools, tool_map = tools_and_map
+        mock_invoke.side_effect = [VALID_PLAN_JSON, "Answer.", CRITIQUE_PASS_JSON]
+        agent = build_legal_agent(tools)
+
+        await agent.ainvoke({"query": "loan requirements", "messages": []})
+
+        # VALID_PLAN_JSON has search_keywords: ["loan", "collateral"] — capped at 2
+        assert tool_map["exact_word_search"].invoke.call_count == 2
 
     @patch("src.agents.legal_agent.invoke")
     async def test_get_article_data_called_for_each_ref(self, mock_invoke, tools_and_map):
@@ -121,7 +139,7 @@ class TestAgentHappyPath:
             "[LAW-88-2003 | Article 2 | active]\nContent A.\n\n---\n\n"
             "[LAW-12-2010 | Article 5 | active]\nContent B."
         )
-        tool_map["similarity_search"].invoke.return_value = two_refs
+        tool_map["hybrid_search_legislation"].invoke.return_value = two_refs
         mock_invoke.side_effect = [VALID_PLAN_JSON, "Answer.", CRITIQUE_PASS_JSON]
         agent = build_legal_agent(tools)
 
@@ -222,7 +240,7 @@ class TestAgentPlanFallback:
 
         await agent.ainvoke({"query": "loan requirements", "messages": []})
 
-        call_kwargs = tool_map["similarity_search"].invoke.call_args[0][0]
+        call_kwargs = tool_map["hybrid_search_legislation"].invoke.call_args[0][0]
         assert call_kwargs["query"] == "loan requirements"
 
 

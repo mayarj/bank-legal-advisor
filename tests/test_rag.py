@@ -5,15 +5,18 @@ import pytest
 from src.db.schemas import LegislationStatus, RelationshipType
 from src.rag.embeddings import embed, embed_batch
 from src.rag.graph import format_for_llm, get_children, get_parents
-from src.rag.retriever import retrieve, retrieve_active
+from src.rag.retriever import retrieve, retrieve_active, retrieve_hybrid, retrieve_exact, retrieve_active_hybrid
 from src.rag.vectorstore import (
     ArticleResult,
     LegislationResult,
     SearchResult,
     add_legislation,
+    bm25_search,
     delete_legislation,
+    exact_search,
     get_article,
     get_legislation,
+    hybrid_search,
     search,
 )
 from tests.conftest import make_relationship
@@ -482,3 +485,241 @@ class TestFormatForLlm:
 
         assert "Direct" in result
         assert "Depth 2" in result
+
+
+# ── BM25 search ───────────────────────────────────────────────────────────────
+
+class TestBM25Search:
+
+    def test_returns_results_for_matching_terms(self, test_collection, sample_legislation):
+        add_legislation(sample_legislation)
+
+        results = bm25_search("collateral loan", n_results=3)
+
+        assert len(results) > 0
+        assert all(isinstance(r, SearchResult) for r in results)
+
+    def test_returns_empty_for_no_matching_terms(self, test_collection, sample_legislation):
+        add_legislation(sample_legislation)
+
+        results = bm25_search("zxqvbnm irrelevant gibberish", n_results=3)
+
+        assert results == []
+
+    def test_result_has_correct_legislation_code(self, test_collection, sample_legislation):
+        add_legislation(sample_legislation)
+
+        results = bm25_search("collateral requirements", n_results=2)
+
+        assert all(r.legislation_code == "LAW-88-2003" for r in results)
+
+    def test_result_score_is_positive(self, test_collection, sample_legislation):
+        add_legislation(sample_legislation)
+
+        results = bm25_search("loan collateral", n_results=3)
+
+        assert all(r.score > 0 for r in results)
+
+    def test_results_ordered_by_score_descending(self, test_collection, sample_legislation):
+        add_legislation(sample_legislation)
+
+        results = bm25_search("loan collateral real estate", n_results=3)
+
+        scores = [r.score for r in results]
+        assert scores == sorted(scores, reverse=True)
+
+    def test_filters_by_metadata(self, test_collection, sample_legislation, sample_legislation_repealed):
+        add_legislation(sample_legislation)
+        add_legislation(sample_legislation_repealed)
+
+        # "secured" appears only in LAW-88-2003 article 2 → unambiguous BM25 signal
+        results = bm25_search("secured banking", n_results=10, filters={"status": "active"})
+
+        codes = [r.legislation_code for r in results]
+        assert "LAW-88-2003" in codes
+        assert "LAW-01-1990" not in codes
+
+    def test_new_legislation_added_after_first_search_is_found(
+        self, test_collection, sample_legislation, sample_legislation_repealed
+    ):
+        add_legislation(sample_legislation)
+        bm25_search("loan", n_results=1)  # triggers lazy load
+
+        add_legislation(sample_legislation_repealed)
+
+        results = bm25_search("repealed regulation threshold", n_results=5)
+        codes = [r.legislation_code for r in results]
+        assert "LAW-01-1990" in codes
+
+
+# ── Exact search ──────────────────────────────────────────────────────────────
+
+class TestExactSearch:
+
+    def test_returns_articles_containing_exact_keyword(self, test_collection, sample_legislation):
+        add_legislation(sample_legislation)
+
+        results = exact_search("real estate", n_results=5)
+
+        assert len(results) > 0
+        assert all("real estate" in r.content for r in results)
+
+    def test_returns_empty_when_keyword_not_present(self, test_collection, sample_legislation):
+        add_legislation(sample_legislation)
+
+        results = exact_search("nonexistent_keyword_xyz", n_results=5)
+
+        assert results == []
+
+    def test_match_is_case_sensitive(self, test_collection, sample_legislation):
+        add_legislation(sample_legislation)
+
+        lower = exact_search("real estate", n_results=5)
+        upper = exact_search("REAL ESTATE", n_results=5)
+
+        assert len(lower) > 0
+        assert len(upper) == 0
+
+    def test_filters_exclude_repealed(
+        self, test_collection, sample_legislation, sample_legislation_repealed
+    ):
+        add_legislation(sample_legislation)
+        add_legislation(sample_legislation_repealed)
+
+        results = exact_search("loan", n_results=10, filters={"status": "active"})
+
+        codes = [r.legislation_code for r in results]
+        assert "LAW-88-2003" in codes
+        assert "LAW-01-1990" not in codes
+
+    def test_result_has_score_of_one(self, test_collection, sample_legislation):
+        add_legislation(sample_legislation)
+
+        results = exact_search("loans", n_results=5)
+
+        assert all(r.score == 1.0 for r in results)
+
+    def test_respects_n_results_limit(self, test_collection, sample_legislation):
+        add_legislation(sample_legislation)
+
+        results = exact_search("loan", n_results=1)
+
+        assert len(results) <= 1
+
+
+# ── Hybrid search ─────────────────────────────────────────────────────────────
+
+class TestHybridSearch:
+
+    def test_returns_search_results(self, test_collection, sample_legislation):
+        add_legislation(sample_legislation)
+
+        results = hybrid_search("loan collateral requirements", n_results=3)
+
+        assert len(results) > 0
+        assert all(isinstance(r, SearchResult) for r in results)
+
+    def test_results_have_rrf_score(self, test_collection, sample_legislation):
+        add_legislation(sample_legislation)
+
+        results = hybrid_search("loan collateral", n_results=3)
+
+        assert all(r.score > 0 for r in results)
+
+    def test_respects_n_results(self, test_collection, sample_legislation):
+        add_legislation(sample_legislation)
+
+        results = hybrid_search("loan", n_results=2)
+
+        assert len(results) <= 2
+
+    def test_with_keyword_boosts_exact_match(self, test_collection, sample_legislation):
+        add_legislation(sample_legislation)
+
+        with_keyword = hybrid_search("loan", keyword="real estate", n_results=3)
+        article_ids = [r.article_id for r in with_keyword]
+
+        assert any("article_2" in aid for aid in article_ids)
+
+    def test_applies_filters(
+        self, test_collection, sample_legislation, sample_legislation_repealed
+    ):
+        add_legislation(sample_legislation)
+        add_legislation(sample_legislation_repealed)
+
+        results = hybrid_search("loan collateral", n_results=10, filters={"status": "active"})
+
+        codes = [r.legislation_code for r in results]
+        assert "LAW-88-2003" in codes
+        assert "LAW-01-1990" not in codes
+
+    def test_no_duplicate_articles_in_results(self, test_collection, sample_legislation):
+        add_legislation(sample_legislation)
+
+        results = hybrid_search("loan collateral requirements", n_results=5)
+
+        ids = [r.article_id for r in results]
+        assert len(ids) == len(set(ids))
+
+    def test_returns_empty_for_empty_collection(self, test_collection):
+        results = hybrid_search("loan requirements", n_results=3)
+
+        assert results == []
+
+
+# ── Retriever hybrid/exact ─────────────────────────────────────────────────────
+
+class TestRetrieverHybrid:
+
+    @patch("src.rag.retriever.hybrid_search")
+    def test_retrieve_hybrid_calls_hybrid_search(self, mock_hybrid):
+        mock_hybrid.return_value = []
+
+        retrieve_hybrid("loan requirements", rewrite=False)
+
+        mock_hybrid.assert_called_once_with(
+            "loan requirements", keyword=None, n_results=5, filters=None
+        )
+
+    @patch("src.rag.retriever.hybrid_search")
+    def test_retrieve_hybrid_passes_keyword(self, mock_hybrid):
+        mock_hybrid.return_value = []
+
+        retrieve_hybrid("loan requirements", keyword="collateral", rewrite=False)
+
+        mock_hybrid.assert_called_once_with(
+            "loan requirements", keyword="collateral", n_results=5, filters=None
+        )
+
+    @patch("src.rag.retriever.hybrid_search")
+    def test_retrieve_active_hybrid_passes_active_filter(self, mock_hybrid):
+        mock_hybrid.return_value = []
+
+        retrieve_active_hybrid("loan requirements", rewrite=False)
+
+        mock_hybrid.assert_called_once_with(
+            "loan requirements", keyword=None, n_results=5, filters={"status": "active"}
+        )
+
+    @patch("src.rag.retriever.invoke")
+    @patch("src.rag.retriever.hybrid_search")
+    def test_retrieve_hybrid_rewrites_query(self, mock_hybrid, mock_invoke):
+        mock_invoke.return_value = "collateral loan legislation"
+        mock_hybrid.return_value = []
+
+        retrieve_hybrid("what about loans?", rewrite=True)
+
+        mock_invoke.assert_called_once()
+        mock_hybrid.assert_called_once_with(
+            "collateral loan legislation", keyword=None, n_results=5, filters=None
+        )
+
+    @patch("src.rag.retriever.exact_search")
+    def test_retrieve_exact_applies_active_filter(self, mock_exact):
+        mock_exact.return_value = []
+
+        retrieve_exact("real estate")
+
+        mock_exact.assert_called_once_with(
+            "real estate", n_results=10, filters={"status": "active"}
+        )

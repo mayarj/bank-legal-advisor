@@ -318,6 +318,93 @@ Decide which legislation to retrieve and output JSON."""
     return system_msg, prompt
 
 
+def loan_assessment_plan_prompt(
+    loan_details: str,
+    customer_context: str,
+    user_clarification: str = "",
+) -> tuple[str, str]:
+    system_msg = """You are a bank loan assessment specialist. Analyze the loan application and available customer data.
+
+Output ONLY valid JSON with this exact structure:
+{
+  "creditworthiness_notes": "string — analysis of income, debt-to-income ratio, credit score, payment behaviour",
+  "risk_indicators": ["string — each a specific red flag or concern"],
+  "legal_questions": ["string — specific legislation compliance questions for this loan"],
+  "needs_user_clarification": boolean,
+  "clarification_question": "string — one precise question to ask the user (empty string if not needed)"
+}
+
+Rules:
+- legal_questions must be answerable from a legislation database (compliance, limits, requirements)
+- legal_questions should NOT ask about the customer or their documents — only about the law
+- needs_user_clarification = true ONLY when critical application data is absent and cannot be inferred
+- If customer_context is empty, note it but do not set needs_user_clarification for that alone"""
+
+    clarification_section = (
+        f"\n\nUSER CLARIFICATION PROVIDED:\n{user_clarification}" if user_clarification else ""
+    )
+    prompt = f"""Analyze this loan application and produce a structured assessment plan.
+
+LOAN DETAILS:
+{loan_details}
+
+CUSTOMER CONTEXT:
+{customer_context if customer_context else "No customer profile is linked to this loan."}
+{clarification_section}
+
+Output only valid JSON."""
+
+    return system_msg, prompt
+
+
+def loan_assessment_synthesis_prompt(
+    loan_details: str,
+    customer_context: str,
+    assessment_plan: dict,
+    legal_context: str,
+    user_clarification: str = "",
+) -> tuple[str, str]:
+    system_msg = """You are a senior bank loan assessment officer. Write a comprehensive, evidence-based final assessment.
+
+Structure your response with these exact sections:
+1. APPLICANT SUMMARY — key facts about the borrower and the requested loan
+2. CREDITWORTHINESS ANALYSIS — income, debt-to-income, credit score, payment history assessment
+3. LEGAL COMPLIANCE — which legislation applies and whether this loan satisfies the requirements
+4. RISK ASSESSMENT — specific risks identified; end this section with: Risk Level: low|medium|high
+5. RECOMMENDATION — one of: Approve / Conditional Approval (list exact conditions) / Reject (state reasons)
+6. CITED LEGISLATION — every article used, each on its own line as [LAW-CODE | Article N | active]"""
+
+    creditworthiness = assessment_plan.get("creditworthiness_notes", "")
+    risk_indicators = "\n".join(
+        f"  - {r}" for r in assessment_plan.get("risk_indicators", [])
+    ) or "  None identified."
+    clarification_section = (
+        f"\nUSER CLARIFICATION:\n{user_clarification}" if user_clarification else ""
+    )
+
+    prompt = f"""Write the final loan assessment using ALL the information provided below.
+
+LOAN APPLICATION:
+{loan_details}
+
+CUSTOMER PROFILE & HISTORY:
+{customer_context if customer_context else "No customer profile linked to this loan."}
+
+PRELIMINARY CREDITWORTHINESS NOTES:
+{creditworthiness}
+
+IDENTIFIED RISK INDICATORS:
+{risk_indicators}
+
+LEGAL ANALYSIS (from legislation database):
+{legal_context if legal_context else "No specific legal clarification was required for this loan type."}
+{clarification_section}
+
+Write the complete final assessment."""
+
+    return system_msg, prompt
+
+
 def complete_search_extraction_pipeline_prompt(user_query, legislation_text_to_search):
     base_system_msg = """
     You are a Legislative Search and Extraction Specialist. Your task is to:

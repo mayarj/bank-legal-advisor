@@ -1,7 +1,8 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dc_replace
 from typing import Optional
 
 import chromadb
+from rank_bm25 import BM25Okapi
 
 from src.core.config import settings
 from src.db.schemas import Legislation
@@ -44,6 +45,72 @@ class SearchResult:
     subject: str
     status: str
     distance: float
+    score: float = 0.0  # RRF score populated by hybrid_search
+
+
+class _BM25Index:
+    """In-memory BM25 index, lazily populated from ChromaDB on first query."""
+
+    def __init__(self) -> None:
+        self._entries: list[tuple[str, str, dict]] = []  # (id, content, metadata)
+        self._bm25: BM25Okapi | None = None
+        self._loaded = False
+
+    def _ensure_ready(self) -> None:
+        if not self._loaded:
+            self._load_from_chroma()
+            self._loaded = True
+        if self._bm25 is None and self._entries:
+            self._rebuild()
+
+    def _load_from_chroma(self) -> None:
+        result = _collection.get(include=["documents", "metadatas"])
+        self._entries = [
+            (aid, doc, meta)
+            for aid, doc, meta in zip(result["ids"], result["documents"], result["metadatas"])
+        ]
+
+    def _rebuild(self) -> None:
+        corpus = [content.lower().split() for _, content, _ in self._entries]
+        self._bm25 = BM25Okapi(corpus)
+
+    def add(self, ids: list[str], documents: list[str], metadatas: list[dict]) -> None:
+        if not self._loaded:
+            return  # lazy load will include these from ChromaDB when first queried
+        existing = {entry[0] for entry in self._entries}
+        new_entries = [
+            (aid, doc, meta)
+            for aid, doc, meta in zip(ids, documents, metadatas)
+            if aid not in existing
+        ]
+        if new_entries:
+            self._entries.extend(new_entries)
+            self._bm25 = None  # mark for rebuild on next search
+
+    def search(
+        self,
+        query: str,
+        n_results: int,
+        filters: dict | None = None,
+    ) -> list[tuple[float, str, str, dict]]:  # (score, id, content, metadata)
+        self._ensure_ready()
+        if not self._entries or self._bm25 is None:
+            return []
+
+        tokens = query.lower().split()
+        scores = self._bm25.get_scores(tokens)
+
+        ranked = [
+            (score, article_id, content, meta)
+            for score, (article_id, content, meta) in zip(scores, self._entries)
+            if score > 0
+            and (filters is None or all(meta.get(k) == v for k, v in filters.items()))
+        ]
+        ranked.sort(key=lambda x: x[0], reverse=True)
+        return ranked[:n_results]
+
+
+_bm25_index = _BM25Index()
 
 
 def add_legislation(legislation: Legislation) -> None:
@@ -53,8 +120,7 @@ def add_legislation(legislation: Legislation) -> None:
     ids, documents, metadatas = [], [], []
 
     for article_number, content in legislation.articles.items():
-        article_id = f"{legislation.code}_article_{article_number}"
-        ids.append(article_id)
+        ids.append(f"{legislation.code}_article_{article_number}")
         documents.append(content)
         metadatas.append({
             "legislation_code": legislation.code,
@@ -76,6 +142,7 @@ def add_legislation(legislation: Legislation) -> None:
         embeddings=batch_embeddings,
         metadatas=metadatas,
     )
+    _bm25_index.add(ids, documents, metadatas)
 
 
 def search(
@@ -106,6 +173,93 @@ def search(
         ))
 
     return output
+
+
+def bm25_search(
+    query: str,
+    n_results: int = 5,
+    filters: dict | None = None,
+) -> list[SearchResult]:
+    raw = _bm25_index.search(query, n_results, filters)
+    return [
+        SearchResult(
+            article_id=article_id,
+            legislation_code=meta["legislation_code"],
+            article_number=meta["article_number"],
+            content=content,
+            subject=meta["subject"],
+            status=meta["status"],
+            distance=0.0,
+            score=bm25_score,
+        )
+        for bm25_score, article_id, content, meta in raw
+    ]
+
+
+def exact_search(
+    keyword: str,
+    n_results: int = 5,
+    filters: dict | None = None,
+) -> list[SearchResult]:
+    """Return articles whose text contains keyword as a substring (case-sensitive)."""
+    kwargs: dict = {
+        "where_document": {"$contains": keyword},
+        "limit": n_results,
+        "include": ["documents", "metadatas"],
+    }
+    if filters:
+        kwargs["where"] = filters
+
+    result = _collection.get(**kwargs)
+
+    return [
+        SearchResult(
+            article_id=article_id,
+            legislation_code=meta["legislation_code"],
+            article_number=meta["article_number"],
+            content=content,
+            subject=meta["subject"],
+            status=meta["status"],
+            distance=0.0,
+            score=1.0,
+        )
+        for article_id, content, meta in zip(
+            result["ids"], result["documents"], result["metadatas"]
+        )
+    ]
+
+
+def hybrid_search(
+    query: str,
+    keyword: str | None = None,
+    n_results: int = 5,
+    filters: dict | None = None,
+) -> list[SearchResult]:
+    """Reciprocal Rank Fusion over semantic + BM25 + (optional) exact results."""
+    _RRF_K = 60
+    candidate_n = n_results * 3
+
+    result_lists: list[list[SearchResult]] = [
+        search(query, n_results=candidate_n, filters=filters),
+        bm25_search(query, n_results=candidate_n, filters=filters),
+    ]
+    if keyword:
+        result_lists.append(exact_search(keyword, n_results=candidate_n, filters=filters))
+
+    rrf_scores: dict[str, float] = {}
+    all_by_id: dict[str, SearchResult] = {}
+
+    for results in result_lists:
+        for rank, r in enumerate(results):
+            rrf_scores[r.article_id] = rrf_scores.get(r.article_id, 0.0) + 1.0 / (_RRF_K + rank + 1)
+            all_by_id.setdefault(r.article_id, r)
+
+    sorted_ids = sorted(rrf_scores, key=rrf_scores.__getitem__, reverse=True)[:n_results]
+    return [
+        dc_replace(all_by_id[aid], score=rrf_scores[aid])
+        for aid in sorted_ids
+        if aid in all_by_id
+    ]
 
 
 def get_article(legislation_code: str, article_number: str) -> Optional[ArticleResult]:

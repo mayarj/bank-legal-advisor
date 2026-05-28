@@ -1,7 +1,7 @@
 from src.mcp.app import mcp
 from src.db.session import AsyncSessionFactory
 from src.rag.graph import format_for_llm, get_children, get_parents
-from src.rag.retriever import retrieve_active
+from src.rag.retriever import retrieve_active, retrieve_active_hybrid, retrieve_exact
 from src.rag.vectorstore import ArticleResult, LegislationResult, get_article, get_legislation
 
 
@@ -60,6 +60,37 @@ def similarity_search(
     results = retrieve_active(query, n_results=n_results, rewrite=rewrite)
     if not results:
         return "No relevant legislation found for the given query."
+    return _format_search_results(results)
+
+
+@mcp.tool()
+def hybrid_search_legislation(
+    query: str,
+    keyword: str | None = None,
+    n_results: int = 5,
+    rewrite: bool = True,
+) -> str:
+    """Search legislation using semantic + BM25 hybrid ranking (Reciprocal Rank Fusion).
+    More robust than pure semantic search — surfaces articles that rank highly under
+    multiple signals (meaning and term frequency).
+    Optionally provide a keyword to also boost articles that contain it verbatim."""
+    results = retrieve_active_hybrid(query, keyword=keyword, n_results=n_results, rewrite=rewrite)
+    if not results:
+        return "No relevant legislation found for the given query."
+    return _format_search_results(results)
+
+
+@mcp.tool()
+def exact_word_search(
+    keyword: str,
+    n_results: int = 10,
+) -> str:
+    """Find active legislation articles that contain an exact word or phrase.
+    Use when you need articles mentioning a specific term, article reference, or legal phrase.
+    keyword match is case-sensitive and must appear verbatim in the article text."""
+    results = retrieve_exact(keyword, n_results=n_results)
+    if not results:
+        return f"No active articles found containing '{keyword}'."
     return _format_search_results(results)
 
 

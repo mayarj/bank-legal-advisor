@@ -10,6 +10,8 @@ import pytest
 import chromadb
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from src.rag.vectorstore import _BM25Index
+
 from src.db.base import Base
 from src.db.models import Relationship as RelationshipModel
 from src.db.schemas import Legislation, LegislationStatus, Relationship, RelationshipType
@@ -67,11 +69,17 @@ def sample_legislation_repealed() -> Legislation:
 @pytest.fixture
 def test_collection(monkeypatch):
     client = chromadb.EphemeralClient()
+    # EphemeralClient shares in-process state; delete stale data from prior tests
+    try:
+        client.delete_collection("test_legislation")
+    except Exception:
+        pass
     collection = client.get_or_create_collection(
         name="test_legislation",
         metadata={"hnsw:space": "cosine"},
     )
     monkeypatch.setattr("src.rag.vectorstore._collection", collection)
+    monkeypatch.setattr("src.rag.vectorstore._bm25_index", _BM25Index())
     return collection
 
 

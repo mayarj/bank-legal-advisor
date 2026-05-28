@@ -24,7 +24,7 @@ class LegalAgentState(TypedDict):
     query: str
     search_plan: dict | None
     needs_clarification: bool
-    similarity_results: str
+    search_results: str
     retrieved_articles: list[str]
     parent_context: str
     needs_children: bool
@@ -82,21 +82,42 @@ def build_legal_agent(tools: list[BaseTool]):
         refined_query = f"{state['query']} {clarification}"
         return {"query": refined_query, "needs_clarification": False}
 
-    def run_similarity_search(state: LegalAgentState) -> dict:
+    def run_search(state: LegalAgentState) -> dict:
         plan = state.get("search_plan") or {}
         queries = plan.get("suggested_search_queries") or [state["query"]]
+        keywords: list[str] = plan.get("search_keywords") or []
         primary_query = queries[0]
 
-        result = tool_map["similarity_search"].invoke({
+        # Primary: hybrid (semantic + BM25), with first keyword as an exact boost
+        hybrid_result = tool_map["hybrid_search_legislation"].invoke({
             "query": primary_query,
+            "keyword": keywords[0] if keywords else None,
             "n_results": settings.similarity_n_results,
             "rewrite": True,
         })
-        return {"similarity_results": result}
+
+        # Secondary: exact search for up to 2 keywords that are specific legal terms
+        exact_parts = []
+        for kw in keywords[:2]:
+            exact_result = tool_map["exact_word_search"].invoke({"keyword": kw, "n_results": 5})
+            if exact_result and f"No active articles found containing '{kw}'" not in exact_result:
+                exact_parts.append(exact_result)
+
+        if exact_parts:
+            combined = hybrid_result + "\n\n--- Exact keyword matches ---\n\n" + "\n\n---\n\n".join(exact_parts)
+        else:
+            combined = hybrid_result
+
+        return {"search_results": combined}
 
     def retrieve_articles(state: LegalAgentState) -> dict:
         retrieved = []
-        for legislation_code, article_number in _parse_article_refs(state["similarity_results"]):
+        seen: set[tuple[str, str]] = set()
+        for legislation_code, article_number in _parse_article_refs(state["search_results"]):
+            key = (legislation_code, article_number)
+            if key in seen:
+                continue
+            seen.add(key)
             content = tool_map["get_article_data"].invoke({
                 "legislation_code": legislation_code,
                 "article_number": article_number,
@@ -104,13 +125,18 @@ def build_legal_agent(tools: list[BaseTool]):
             retrieved.append(content)
 
         if not retrieved:
-            retrieved = [state["similarity_results"]]
+            retrieved = [state["search_results"]]
 
         return {"retrieved_articles": retrieved}
 
     async def traverse_parents(state: LegalAgentState) -> dict:
         parent_sections = []
-        for legislation_code, article_number in _parse_article_refs(state["similarity_results"]):
+        seen: set[tuple[str, str]] = set()
+        for legislation_code, article_number in _parse_article_refs(state["search_results"]):
+            key = (legislation_code, article_number)
+            if key in seen:
+                continue
+            seen.add(key)
             context = await tool_map["get_relationship_map"].ainvoke({
                 "legislation_code": legislation_code,
                 "article_number": article_number,
@@ -149,7 +175,12 @@ def build_legal_agent(tools: list[BaseTool]):
 
     async def traverse_children(state: LegalAgentState) -> dict:
         children_sections = []
-        for legislation_code, article_number in _parse_article_refs(state["similarity_results"]):
+        seen: set[tuple[str, str]] = set()
+        for legislation_code, article_number in _parse_article_refs(state["search_results"]):
+            key = (legislation_code, article_number)
+            if key in seen:
+                continue
+            seen.add(key)
             context = await tool_map["get_relationship_map"].ainvoke({
                 "legislation_code": legislation_code,
                 "article_number": article_number,
@@ -198,7 +229,7 @@ def build_legal_agent(tools: list[BaseTool]):
     # ── Conditional routers ───────────────────────────────────────────────────
 
     def route_after_plan(state: LegalAgentState) -> str:
-        return "ask_clarification" if state["needs_clarification"] else "similarity_search"
+        return "ask_clarification" if state["needs_clarification"] else "search"
 
     def route_after_evaluate(state: LegalAgentState) -> str:
         return "traverse_children" if state["needs_children"] else "synthesize"
@@ -212,7 +243,7 @@ def build_legal_agent(tools: list[BaseTool]):
 
     graph.add_node("plan", plan_search)
     graph.add_node("ask_clarification", ask_clarification)
-    graph.add_node("similarity_search", run_similarity_search)
+    graph.add_node("search", run_search)
     graph.add_node("retrieve_articles", retrieve_articles)
     graph.add_node("traverse_parents", traverse_parents)
     graph.add_node("evaluate_relationships", evaluate_relationships)
@@ -224,10 +255,10 @@ def build_legal_agent(tools: list[BaseTool]):
 
     graph.add_conditional_edges("plan", route_after_plan, {
         "ask_clarification": "ask_clarification",
-        "similarity_search": "similarity_search",
+        "search": "search",
     })
-    graph.add_edge("ask_clarification", "similarity_search")
-    graph.add_edge("similarity_search", "retrieve_articles")
+    graph.add_edge("ask_clarification", "search")
+    graph.add_edge("search", "retrieve_articles")
     graph.add_edge("retrieve_articles", "traverse_parents")
     graph.add_edge("traverse_parents", "evaluate_relationships")
     graph.add_conditional_edges("evaluate_relationships", route_after_evaluate, {

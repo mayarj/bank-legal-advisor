@@ -18,7 +18,6 @@ Built as a portfolio project to demonstrate production-grade patterns for agenti
 - [API Reference](#api-reference)
 - [Running Tests](#running-tests)
 - [Notes on Production Readiness](#notes-on-production-readiness)
-- [License](#license)
 - [Acknowledgments](#acknowledgments)
 
 ---

@@ -4,8 +4,6 @@ from contextlib import asynccontextmanager
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_core.tools import BaseTool
 
-# Starts the MCP server as a subprocess using the same Python interpreter.
-# stdio transport: client writes to the server's stdin, reads from its stdout.
 _SERVER_CONFIG = {
     "legal-server": {
         "command": sys.executable,
@@ -17,31 +15,27 @@ _SERVER_CONFIG = {
 
 @asynccontextmanager
 async def mcp_client():
-    """Async context manager that starts the MCP server, yields LangChain-compatible
-    tools, and shuts the server down on exit.
+    """Start the MCP server subprocess, yield LangChain-compatible tools,
+    and keep the connection alive until the context exits.
 
-    The connection must stay open while tools are in use — tools call back to the
-    server subprocess when invoked, so closing the context before the agent finishes
-    will break in-flight tool calls.
+    langchain-mcp-adapters >= 0.1.0 removed the async-context-manager interface
+    from MultiServerMCPClient. The client object must stay in scope for the full
+    lifetime of tool use — moving it to a local variable inside the generator
+    achieves this because generator locals live until the generator is exhausted.
 
-    Usage in an agent:
-        async with mcp_client() as tools:
-            agent = create_react_agent(llm, tools)
-            response = await agent.ainvoke({...})
-
-    Usage in FastAPI lifespan (keeps connection alive for all requests):
+    Usage (FastAPI lifespan):
         async with mcp_client() as tools:
             app.state.tools = tools
             yield
     """
-    async with MultiServerMCPClient(_SERVER_CONFIG) as client:
-        yield client.get_tools()
+    client = MultiServerMCPClient(_SERVER_CONFIG)
+    tools = await client.get_tools()
+    yield tools
+    # generator returns here → client goes out of scope → subprocess terminates
 
 
 async def get_tools_once() -> list[BaseTool]:
-    """Returns tools without holding the connection open.
-    Only safe when the tools themselves do not call back to the server after this
-    function returns — i.e. for inspection, testing, or pre-binding to an LLM.
-    For actual agent execution use mcp_client() instead."""
-    async with MultiServerMCPClient(_SERVER_CONFIG) as client:
-        return client.get_tools()
+    """Return tools without holding the connection open.
+    Only safe for inspection or pre-binding — not for actual agent execution."""
+    client = MultiServerMCPClient(_SERVER_CONFIG)
+    return await client.get_tools()

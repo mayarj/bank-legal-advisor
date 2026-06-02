@@ -4,6 +4,16 @@ An AI-powered backend system for banking legal compliance and loan assessment. I
 
 Built as a portfolio project to demonstrate production-grade patterns for agentic AI systems — not intended for live banking use without additional hardening.
 
+> ⚠️ **This project is under active development.** Interfaces and the data model may still change.
+>
+> **In progress — per-article legal status propagation:** legal status is tracked per *article*
+> (not per whole legislation). When a newly ingested law amends or repeals another, the affected
+> articles' status and searchability (`is_in_force`) are recomputed automatically — and resolved
+> correctly even when laws are ingested out of order. The propagation is intentionally
+> conservative (direct effects only, latest-by-date wins, no automatic revival); chained or
+> conflicting cases are left to the agent's relationship-graph reasoning at query time. Design
+> notes: [STATUS_PROPAGATION_PLAN.md](STATUS_PROPAGATION_PLAN.md).
+
 ---
 
 ## Table of Contents
@@ -32,7 +42,7 @@ Built as a portfolio project to demonstrate production-grade patterns for agenti
 - **Human-in-the-loop** — Both agents can pause mid-run and surface a clarification question to the user via the API; the conversation resumes when the user replies.
 - **MCP tool server** — All data operations (legislation lookup, loan CRUD, customer retrieval) are exposed as MCP tools so agents can call them without direct DB access.
 - **REST API** — FastAPI application with 16 endpoints covering ingestion, legal Q&A, loan management, and customer management.
-- **282 tests** — Unit, integration, and HTTP-level tests across all layers.
+- **303 tests** — Unit, integration, and HTTP-level tests across all layers.
 
 ---
 
@@ -142,6 +152,8 @@ bank-legal-advisor/
 │       ├── vectorstore.py        # ChromaDB + BM25 index + hybrid search
 │       ├── embeddings.py         # SentenceTransformer (lazy-loaded)
 │       ├── retriever.py          # High-level retrieval functions
+│       ├── status_policy.py      # Pure article-status propagation rules
+│       ├── reconcile.py          # Recompute article status on ingest (both directions)
 │       └── graph.py              # Legislation relationship graph traversal
 └── tests/
     ├── test_api.py               # FastAPI HTTP-level tests (39)
@@ -368,7 +380,7 @@ The test suite uses:
 - **Mocked LLM calls** — no Anthropic API key needed to run tests.
 
 ```
-282 passed in ~20s
+303 passed in ~20s
 ```
 
 Test files and what they cover:
@@ -382,6 +394,7 @@ Test files and what they cover:
 | `test_loans.py` | Loan CRUD + MCP tools | 51 |
 | `test_customers.py` | Customer CRUD + MCP tools | 35 |
 | `test_mcp_tools.py` | Legal MCP tools | 19 |
+| `test_reconcile.py` | Article status propagation | 21 |
 | `test_ingestion.py` + others | Parser, pipeline, ingestion | 30 |
 
 ---

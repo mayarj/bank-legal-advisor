@@ -7,12 +7,6 @@ Built as a portfolio project to demonstrate production-grade patterns for agenti
 > ⚠️ **This project is under active development.** Interfaces and the data model may still change.
 >
 > **In progress — per-article legal status propagation:** legal status is tracked per *article*
-> (not per whole legislation). When a newly ingested law amends or repeals another, the affected
-> articles' status and searchability (`is_in_force`) are recomputed automatically — and resolved
-> correctly even when laws are ingested out of order. The propagation is intentionally
-> conservative (direct effects only, latest-by-date wins, no automatic revival); chained or
-> conflicting cases are left to the agent's relationship-graph reasoning at query time. Design
-> notes: [STATUS_PROPAGATION_PLAN.md](STATUS_PROPAGATION_PLAN.md).
 
 ---
 

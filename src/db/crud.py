@@ -3,11 +3,27 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.db.models import CustomerProfile, Loan, LoanAssessment, Payment
-from src.db.schemas import AssessmentCreate, CustomerProfileCreate, LoanCreate, LoanStatus, PaymentCreate
+from src.db.models import (
+    Article as ArticleModel,
+    CustomerProfile,
+    Legislation as LegislationModel,
+    Loan,
+    LoanAssessment,
+    Payment,
+    Relationship as RelationshipModel,
+)
+from src.db.schemas import (
+    AssessmentCreate,
+    CustomerProfileCreate,
+    Legislation as LegislationSchema,
+    LoanCreate,
+    LoanStatus,
+    PaymentCreate,
+)
+from src.rag.status_policy import article_baseline
 
 
 # ── Loan ──────────────────────────────────────────────────────────────────────
@@ -226,5 +242,90 @@ async def get_payments_for_loan(
         select(Payment)
         .where(Payment.loan_id == loan_id)
         .order_by(Payment.due_date.desc())
+    )
+    return list(result.scalars().all())
+
+
+# ── Legislation & Article (status reconciliation) ──────────────────────────────
+
+def _article_id(legislation_code: str, article_number: str) -> str:
+    return f"{legislation_code}_article_{article_number}"
+
+
+async def upsert_legislation(
+    session: AsyncSession, legislation: LegislationSchema
+) -> LegislationModel:
+    """Create or update the legislation metadata row (idempotent re-ingestion)."""
+    row = await session.get(LegislationModel, legislation.code)
+    if row is None:
+        row = LegislationModel(code=legislation.code)
+        session.add(row)
+    row.date = legislation.date
+    row.issuer = legislation.issuer
+    row.subject = legislation.subject
+    row.status = legislation.status
+    await session.flush()
+    return row
+
+
+async def upsert_articles(
+    session: AsyncSession, legislation: LegislationSchema
+) -> list[ArticleModel]:
+    """Create Article rows for a legislation's articles, seeded from the legislation's
+    baseline status. Existing rows are left untouched so a previously reconciled status
+    is not clobbered — reconciliation recomputes them afterwards."""
+    base_status, base_in_force = article_baseline(legislation.status)
+    rows: list[ArticleModel] = []
+    for number in legislation.articles:
+        aid = _article_id(legislation.code, number)
+        row = await session.get(ArticleModel, aid)
+        if row is None:
+            row = ArticleModel(
+                id=aid,
+                legislation_code=legislation.code,
+                article_number=number,
+                status=base_status,
+                is_in_force=base_in_force,
+            )
+            session.add(row)
+        rows.append(row)
+    await session.flush()
+    return rows
+
+
+async def get_legislation_row(
+    session: AsyncSession, legislation_code: str
+) -> Optional[LegislationModel]:
+    return await session.get(LegislationModel, legislation_code)
+
+
+async def get_article_row(
+    session: AsyncSession, legislation_code: str, article_number: str
+) -> Optional[ArticleModel]:
+    return await session.get(ArticleModel, _article_id(legislation_code, article_number))
+
+
+async def get_articles_for_legislation(
+    session: AsyncSession, legislation_code: str
+) -> list[ArticleModel]:
+    result = await session.execute(
+        select(ArticleModel).where(ArticleModel.legislation_code == legislation_code)
+    )
+    return list(result.scalars().all())
+
+
+async def get_incoming_relationships(
+    session: AsyncSession, legislation_code: str, article_number: str
+) -> list[RelationshipModel]:
+    """Every relationship that targets this article — including whole-legislation
+    relationships (affected_article IS NULL), which apply to all of its articles."""
+    result = await session.execute(
+        select(RelationshipModel).where(
+            RelationshipModel.affected_legislation == legislation_code,
+            or_(
+                RelationshipModel.affected_article == article_number,
+                RelationshipModel.affected_article.is_(None),
+            ),
+        )
     )
     return list(result.scalars().all())

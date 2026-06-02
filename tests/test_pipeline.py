@@ -21,14 +21,21 @@ def sample_legislation_with_relationships() -> Legislation:
 
 
 # ── run_pipeline ──────────────────────────────────────────────────────────────
+#
+# These are orchestration tests: the vector store (add_legislation), Postgres metadata
+# save, and status reconciliation are patched out. Their real behaviour is covered in
+# test_reconcile.py. _save_relationships is left real so its DB writes are still verified.
 
 class TestRunPipeline:
 
+    @patch("src.rag.pipeline.reconcile_after_ingest", new_callable=AsyncMock)
+    @patch("src.rag.pipeline._save_legislation_metadata", new_callable=AsyncMock)
     @patch("src.rag.pipeline.add_legislation")
     @patch("src.rag.pipeline.run_ingestion_workflow")
     @patch("src.rag.pipeline.parse_pdf")
     async def test_returns_legislation_on_success(
-        self, mock_parse, mock_ingest, mock_add, db_session, sample_legislation_with_relationships
+        self, mock_parse, mock_ingest, mock_add, mock_save_meta, mock_reconcile,
+        db_session, sample_legislation_with_relationships
     ):
         mock_parse.return_value = "some legislation text"
         mock_ingest.return_value = sample_legislation_with_relationships
@@ -39,11 +46,14 @@ class TestRunPipeline:
         assert result is not None
         assert result.code == "LAW-88-2003"
 
+    @patch("src.rag.pipeline.reconcile_after_ingest", new_callable=AsyncMock)
+    @patch("src.rag.pipeline._save_legislation_metadata", new_callable=AsyncMock)
     @patch("src.rag.pipeline.add_legislation")
     @patch("src.rag.pipeline.run_ingestion_workflow")
     @patch("src.rag.pipeline.parse_pdf")
     async def test_calls_each_step_in_order(
-        self, mock_parse, mock_ingest, mock_add, db_session, sample_legislation_with_relationships
+        self, mock_parse, mock_ingest, mock_add, mock_save_meta, mock_reconcile,
+        db_session, sample_legislation_with_relationships
     ):
         mock_parse.return_value = "text"
         mock_ingest.return_value = sample_legislation_with_relationships
@@ -54,6 +64,8 @@ class TestRunPipeline:
         mock_parse.assert_called_once_with("/fake/path.pdf")
         mock_ingest.assert_called_once_with("text")
         mock_add.assert_called_once_with(sample_legislation_with_relationships)
+        mock_save_meta.assert_awaited_once_with(sample_legislation_with_relationships, db_session)
+        mock_reconcile.assert_awaited_once_with(db_session, sample_legislation_with_relationships)
 
     @patch("src.rag.pipeline.run_ingestion_workflow")
     @patch("src.rag.pipeline.parse_pdf")
@@ -67,11 +79,13 @@ class TestRunPipeline:
         assert result is None
         mock_ingest.assert_not_called()
 
+    @patch("src.rag.pipeline.reconcile_after_ingest", new_callable=AsyncMock)
+    @patch("src.rag.pipeline._save_legislation_metadata", new_callable=AsyncMock)
     @patch("src.rag.pipeline.add_legislation")
     @patch("src.rag.pipeline.run_ingestion_workflow")
     @patch("src.rag.pipeline.parse_pdf")
     async def test_returns_none_when_ingestion_fails(
-        self, mock_parse, mock_ingest, mock_add, db_session
+        self, mock_parse, mock_ingest, mock_add, mock_save_meta, mock_reconcile, db_session
     ):
         mock_parse.return_value = "some text"
         mock_ingest.return_value = None
@@ -80,12 +94,17 @@ class TestRunPipeline:
 
         assert result is None
         mock_add.assert_not_called()
+        mock_save_meta.assert_not_awaited()
+        mock_reconcile.assert_not_awaited()
 
+    @patch("src.rag.pipeline.reconcile_after_ingest", new_callable=AsyncMock)
+    @patch("src.rag.pipeline._save_legislation_metadata", new_callable=AsyncMock)
     @patch("src.rag.pipeline.add_legislation")
     @patch("src.rag.pipeline.run_ingestion_workflow")
     @patch("src.rag.pipeline.parse_pdf")
     async def test_saves_relationships_to_database(
-        self, mock_parse, mock_ingest, mock_add, db_session, sample_legislation_with_relationships
+        self, mock_parse, mock_ingest, mock_add, mock_save_meta, mock_reconcile,
+        db_session, sample_legislation_with_relationships
     ):
         mock_parse.return_value = "text"
         mock_ingest.return_value = sample_legislation_with_relationships
@@ -96,11 +115,13 @@ class TestRunPipeline:
         rows = (await db_session.execute(select(RelationshipModel))).scalars().all()
         assert len(rows) == len(sample_legislation_with_relationships.relationships)
 
+    @patch("src.rag.pipeline.reconcile_after_ingest", new_callable=AsyncMock)
+    @patch("src.rag.pipeline._save_legislation_metadata", new_callable=AsyncMock)
     @patch("src.rag.pipeline.add_legislation")
     @patch("src.rag.pipeline.run_ingestion_workflow")
     @patch("src.rag.pipeline.parse_pdf")
     async def test_pipeline_with_no_relationships_saves_nothing(
-        self, mock_parse, mock_ingest, mock_add, db_session
+        self, mock_parse, mock_ingest, mock_add, mock_save_meta, mock_reconcile, db_session
     ):
         legislation = Legislation.model_validate_json(VALID_LEGISLATION_JSON)
         legislation.relationships = []

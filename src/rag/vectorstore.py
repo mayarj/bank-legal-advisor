@@ -7,6 +7,7 @@ from rank_bm25 import BM25Okapi
 from src.core.config import settings
 from src.db.schemas import Legislation
 from src.rag.embeddings import embed, embed_batch
+from src.rag.status_policy import article_baseline
 
 _client = chromadb.PersistentClient(path=settings.chroma_path)
 _collection = _client.get_or_create_collection(
@@ -87,6 +88,17 @@ class _BM25Index:
             self._entries.extend(new_entries)
             self._bm25 = None  # mark for rebuild on next search
 
+    def update_metadata(self, article_id: str, metadata: dict) -> None:
+        """Refresh the cached metadata for one article (e.g. after a status change) so
+        filtered BM25 searches see the new value. Content is unchanged, so the BM25 scores
+        do not need rebuilding."""
+        if not self._loaded:
+            return
+        for i, (aid, content, _meta) in enumerate(self._entries):
+            if aid == article_id:
+                self._entries[i] = (aid, content, metadata)
+                break
+
     def search(
         self,
         query: str,
@@ -117,6 +129,10 @@ def add_legislation(legislation: Legislation) -> None:
     if not legislation.articles:
         return
 
+    # Seed article metadata from the legislation baseline; reconciliation overwrites
+    # status/is_in_force afterwards for any article that relationships actually affect.
+    base_status, base_in_force = article_baseline(legislation.status)
+
     ids, documents, metadatas = [], [], []
 
     for article_number, content in legislation.articles.items():
@@ -125,7 +141,8 @@ def add_legislation(legislation: Legislation) -> None:
         metadatas.append({
             "legislation_code": legislation.code,
             "article_number": article_number,
-            "status": legislation.status.value,
+            "status": base_status.value,
+            "is_in_force": base_in_force,
             "issuer": legislation.issuer,
             "subject": legislation.subject,
             "date": legislation.date.isoformat(),
@@ -143,6 +160,22 @@ def add_legislation(legislation: Legislation) -> None:
         metadatas=metadatas,
     )
     _bm25_index.add(ids, documents, metadatas)
+
+
+def update_article_status(article_id: str, status: str, is_in_force: bool) -> None:
+    """Mirror a recomputed article status into ChromaDB metadata. Best-effort: a no-op if
+    the article is not in the vector store (Postgres remains the source of truth). Existing
+    metadata fields (subject, issuer, …) are preserved."""
+    existing = _collection.get(ids=[article_id], include=["metadatas"])
+    if not existing["ids"]:
+        return
+
+    meta = dict(existing["metadatas"][0])
+    meta["status"] = status
+    meta["is_in_force"] = is_in_force
+
+    _collection.update(ids=[article_id], metadatas=[meta])
+    _bm25_index.update_metadata(article_id, meta)
 
 
 def search(

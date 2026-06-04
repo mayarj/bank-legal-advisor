@@ -8,6 +8,14 @@ Built as a portfolio project to demonstrate production-grade patterns for agenti
 >
 > **In progress — per-article legal status propagation:** legal status is tracked per *article*
 
+> ⚠️ **Known limitation — in-process state & horizontal scaling (planned fix).** 
+as a **single backend instance**. Some state still lives inside the process: the
+> LangGraph agent checkpointer is an in-memory `MemorySaver` rebuilt per request (so the
+> clarification *resume* flow does not yet persist its state durably), ChromaDB runs embedded
+> on local files, and the BM25 index is held in memory per process. These prevent running
+> multiple backend replicas behind a load balancer — and the checkpointer one affects resume
+> even on a single instance. Planned fixes: a shared **PostgresSaver** checkpointer, **Chroma in
+> server mode** via `HttpClient`, and a shared/invalidated lexical index.
 
 ---
 

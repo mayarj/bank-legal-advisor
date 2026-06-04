@@ -266,13 +266,13 @@ class TestRetriever:
         )
 
     @patch("src.rag.retriever.search")
-    def test_retrieve_active_applies_active_status_filter(self, mock_search):
+    def test_retrieve_active_applies_in_force_filter(self, mock_search):
         mock_search.return_value = []
 
         retrieve_active("loan collateral", rewrite=False)
 
         mock_search.assert_called_once_with(
-            "loan collateral", n_results=5, filters={"status": "active"}
+            "loan collateral", n_results=5, filters={"is_in_force": True}
         )
 
     @patch("src.rag.retriever.search")
@@ -692,13 +692,13 @@ class TestRetrieverHybrid:
         )
 
     @patch("src.rag.retriever.hybrid_search")
-    def test_retrieve_active_hybrid_passes_active_filter(self, mock_hybrid):
+    def test_retrieve_active_hybrid_passes_in_force_filter(self, mock_hybrid):
         mock_hybrid.return_value = []
 
         retrieve_active_hybrid("loan requirements", rewrite=False)
 
         mock_hybrid.assert_called_once_with(
-            "loan requirements", keyword=None, n_results=5, filters={"status": "active"}
+            "loan requirements", keyword=None, n_results=5, filters={"is_in_force": True}
         )
 
     @patch("src.rag.retriever.invoke")
@@ -715,11 +715,11 @@ class TestRetrieverHybrid:
         )
 
     @patch("src.rag.retriever.exact_search")
-    def test_retrieve_exact_applies_active_filter(self, mock_exact):
+    def test_retrieve_exact_applies_in_force_filter(self, mock_exact):
         mock_exact.return_value = []
 
         retrieve_exact("real estate")
 
         mock_exact.assert_called_once_with(
-            "real estate", n_results=10, filters={"status": "active"}
+            "real estate", n_results=10, filters={"is_in_force": True}
         )

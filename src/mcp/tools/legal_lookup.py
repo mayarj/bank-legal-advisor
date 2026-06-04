@@ -54,7 +54,8 @@ def similarity_search(
     rewrite: bool = True,
 ) -> str:
     """Search for legislation articles semantically relevant to a question or topic.
-    Only searches legislation with status=active.
+    Only searches articles currently in force (repealed/superseded articles are excluded;
+    amended articles are still in force and are included).
     Set rewrite=True (default) to let the LLM rephrase the query into legal terminology
     before searching — improves accuracy for conversational questions."""
     results = retrieve_active(query, n_results=n_results, rewrite=rewrite)
@@ -85,7 +86,7 @@ def exact_word_search(
     keyword: str,
     n_results: int = 10,
 ) -> str:
-    """Find active legislation articles that contain an exact word or phrase.
+    """Find in-force legislation articles that contain an exact word or phrase.
     Use when you need articles mentioning a specific term, article reference, or legal phrase.
     keyword match is case-sensitive and must appear verbatim in the article text."""
     results = retrieve_exact(keyword, n_results=n_results)

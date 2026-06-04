@@ -24,6 +24,17 @@ class LegislationStatus(str, Enum):
     DRAFT = "draft"
 
 
+class ArticleStatus(str, Enum):
+    """Per-article status. Distinct from legislation-level status: a single article
+    may be amended or repealed while the rest of its legislation stays in force.
+    `conflict` marks an article whose incoming relationships are ambiguous and must
+    be resolved by the agent at query time rather than by the propagation rule."""
+    ACTIVE = "active"
+    AMENDED = "amended"
+    REPEALED = "repealed"
+    CONFLICT = "conflict"
+
+
 class Relationship(BaseModel):
     type: RelationshipType
     father_legislation: str

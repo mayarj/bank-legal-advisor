@@ -8,6 +8,7 @@ Built as a portfolio project to demonstrate production-grade patterns for agenti
 >
 > **In progress — per-article legal status propagation:** legal status is tracked per *article*
 
+
 ---
 
 ## Table of Contents

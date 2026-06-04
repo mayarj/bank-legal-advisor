@@ -3,14 +3,16 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import Date, DateTime, Enum as SAEnum, ForeignKey, Index, Integer, Numeric, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Enum as SAEnum, ForeignKey, Index, Integer, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
 from src.db.base import Base
 from src.db.schemas import (
+    ArticleStatus,
     CollateralType,
     EmploymentStatus,
+    LegislationStatus,
     LoanStatus,
     LoanType,
     PaymentStatus,
@@ -33,6 +35,43 @@ class Relationship(Base):
     __table_args__ = (
         Index("ix_father_legislation", "father_legislation"),
         Index("ix_affected_legislation", "affected_legislation"),
+    )
+
+
+class Legislation(Base):
+    """Authoritative legislation metadata. Article content + embeddings still live in
+    ChromaDB; this row holds the structured fields needed for status reconciliation
+    (notably `date`, used to order competing effects, and the legislation-level status)."""
+    __tablename__ = "legislations"
+
+    code: Mapped[str] = mapped_column(String, primary_key=True)
+    date: Mapped[date] = mapped_column(Date)
+    issuer: Mapped[str] = mapped_column(String)
+    subject: Mapped[str] = mapped_column(String)
+    status: Mapped[LegislationStatus] = mapped_column(
+        SAEnum(LegislationStatus), default=LegislationStatus.ACTIVE
+    )
+
+
+class Article(Base):
+    """Per-article status, recomputed from incoming relationships at ingestion.
+    `is_in_force` is the search-time filter (an amended article is still in force and
+    must remain retrievable); `status` is the descriptive label. ChromaDB metadata
+    keeps a synced copy of both — Postgres is the source of truth."""
+    __tablename__ = "articles"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)  # "{code}_article_{number}"
+    legislation_code: Mapped[str] = mapped_column(
+        String, ForeignKey("legislations.code", ondelete="CASCADE"), index=True
+    )
+    article_number: Mapped[str] = mapped_column(String)
+    status: Mapped[ArticleStatus] = mapped_column(
+        SAEnum(ArticleStatus), default=ArticleStatus.ACTIVE
+    )
+    is_in_force: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    __table_args__ = (
+        Index("ix_article_legislation_article", "legislation_code", "article_number"),
     )
 
 

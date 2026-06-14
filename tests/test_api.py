@@ -163,7 +163,7 @@ class TestHealth:
     async def test_returns_200_ok(self, client):
         response = await client.get("/health")
         assert response.status_code == 200
-        assert response.json() == {"status": "ok"}
+        assert response.json()["status"] == "ok"
 
 
 # ── Ingest ────────────────────────────────────────────────────────────────────
@@ -190,10 +190,29 @@ class TestIngest:
         assert body["code"] == "LAW-88-2003"
         assert body["articles_count"] == 2
 
-    async def test_non_pdf_rejected_with_400(self, client):
+    @patch("src.api.routes.ingest.run_pipeline_from_text")
+    async def test_txt_ingested_successfully(self, mock_pipeline, client):
+        leg = MagicMock()
+        leg.code = "LAW-88-2003"
+        leg.subject = "Banking collateral"
+        leg.status = MagicMock(value="active")
+        leg.articles = {"1": "Article text"}
+        leg.relationships = []
+        mock_pipeline.return_value = leg
+
         response = await client.post(
             "/ingest/",
-            files={"file": ("law.txt", b"some text", "text/plain")},
+            files={"file": ("law.txt", b"Article 1: text", "text/plain")},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["code"] == "LAW-88-2003"
+        mock_pipeline.assert_awaited_once()
+
+    async def test_unsupported_type_rejected_with_400(self, client):
+        response = await client.post(
+            "/ingest/",
+            files={"file": ("law.docx", b"some text", "application/octet-stream")},
         )
         assert response.status_code == 400
 

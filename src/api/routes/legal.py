@@ -1,11 +1,11 @@
 import uuid
 from typing import Union
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from langchain_core.tools import BaseTool
 
 from src.agents.legal_agent import build_legal_agent
-from src.api.deps import get_tools
+from src.api.deps import get_checkpointer, get_tools
 from src.api.schemas import AskRequest, AskResponse, ClarificationRequired
 
 router = APIRouter(prefix="/ask", tags=["legal advisor"])
@@ -19,8 +19,9 @@ router = APIRouter(prefix="/ask", tags=["legal advisor"])
 async def ask_legal_question(
     body: AskRequest,
     tools: list[BaseTool] = Depends(get_tools),
+    checkpointer=Depends(get_checkpointer),
 ):
-    agent = build_legal_agent(tools)
+    agent = build_legal_agent(tools, checkpointer=checkpointer)
     tid = body.thread_id or str(uuid.uuid4())
     config = {"configurable": {"thread_id": tid}}
 
@@ -35,14 +36,16 @@ async def ask_legal_question(
 
     # Graph paused at an interrupt — surface the clarification question
     snapshot = await agent.aget_state(config)
-    return ClarificationRequired(
-        thread_id=tid,
-        question=_first_interrupt_message(snapshot),
-    )
+    message, options = _first_interrupt(snapshot)
+    return ClarificationRequired(thread_id=tid, question=message, options=options)
 
 
-def _first_interrupt_message(snapshot) -> str:
+def _first_interrupt(snapshot) -> tuple[str, list]:
     for task in snapshot.tasks:
         for intr in getattr(task, "interrupts", []):
-            return str(intr.value.get("message", "Please provide more information."))
-    return "Please provide more information."
+            value = intr.value if isinstance(intr.value, dict) else {}
+            return (
+                str(value.get("message", "Please provide more information.")),
+                value.get("options", []) or [],
+            )
+    return "Please provide more information.", []

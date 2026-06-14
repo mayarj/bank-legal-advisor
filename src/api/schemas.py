@@ -93,6 +93,7 @@ class ClarificationRequired(BaseModel):
     thread_id: str
     needs_clarification: bool = True
     question: str
+    options: list = []
 
 
 class AssessLoanRequest(BaseModel):

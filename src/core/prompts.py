@@ -291,29 +291,102 @@ Evaluate this answer and output JSON."""
     return system_msg, prompt
 
 
-def evaluate_relationships_prompt(query: str, relationship_context: str) -> tuple[str, str]:
-    system_msg = """You are a legal relevance evaluator. Given a user question and a list of
-related legislation (with conditions), decide which legislation is relevant to retrieve
-and whether child legislation needs to be checked.
+def assess_article_relationships_prompt(
+    query: str, source_article: str, relationship_map: str
+) -> tuple[str, str]:
+    """Per-article decision: given ONE source article's relationship map (parents + children),
+    decide which related legislation to retrieve now and which is ambiguous (needs the user)."""
+
+    system_msg = """You are a legal relevance evaluator working on ONE source article at a time.
+You are given the user's question and a relationship map for a single article — the upstream
+legislation that affects it (parents) and the downstream legislation it affects (children).
+Each related item carries a CONDITION (illustration) describing when the relationship applies.
+
+For every related item, read its condition and classify it into exactly one bucket:
+- "retrieve": the condition clearly APPLIES to the user's situation (or always applies), so the
+  document should be pulled now.
+- "ambiguous": the condition MIGHT apply but you cannot tell from the question alone — it depends
+  on a fact about the user's situation that was not stated. These will be sent back to the user.
+Drop (include in neither bucket) any item whose condition clearly does NOT apply.
 
 Output ONLY valid JSON with this structure:
 {
-  "legislations_to_retrieve": list of legislation codes (strings),
-  "needs_children": boolean,
+  "retrieve": [
+    {"legislation_code": string, "article_number": string or null, "reason": string}
+  ],
+  "ambiguous": [
+    {"legislation_code": string, "article_number": string or null, "condition": string,
+     "question": string}
+  ],
   "reasoning": string
 }
 
-For each relationship in the context, read its condition (illustration).
-Include the legislation ONLY if its condition applies to the user's situation.
-Set needs_children=true if any retrieved legislation likely has implementing
-regulations or exceptions that could affect the answer."""
+Rules:
+- Use article_number = null to pull the whole legislation; set it only when one specific article matters.
+- "question" must be a short, concrete yes/no-style question that would resolve the ambiguity.
+- If there is nothing relevant, return empty lists for both buckets."""
 
-    prompt = f"""QUESTION: {query}
+    prompt = f"""USER QUESTION: {query}
 
-RELATED LEGISLATION:
-{relationship_context}
+SOURCE ARTICLE: {source_article}
 
-Decide which legislation to retrieve and output JSON."""
+RELATIONSHIP MAP FOR THIS ARTICLE:
+{relationship_map}
+
+Classify each related item into retrieve / ambiguous and output JSON."""
+
+    return system_msg, prompt
+
+
+def select_relationships_prompt(
+    query: str, user_clarification: str, ambiguous_items: list[dict]
+) -> tuple[str, str]:
+    """Given the user's clarification reply, decide which previously-ambiguous related
+    legislation should now be retrieved."""
+
+    import json as _json
+
+    system_msg = """You map a user's clarification onto a list of previously-ambiguous related
+legislation and decide which items should now be retrieved.
+
+You are given the original question, the user's clarification reply, and a numbered list of
+ambiguous items (each with a legislation_code, optional article_number, and the condition that
+made it ambiguous). Decide, based on the clarification, which items now clearly apply.
+
+Output ONLY valid JSON with this structure:
+{
+  "retrieve": [
+    {"legislation_code": string, "article_number": string or null}
+  ]
+}
+
+Rules:
+- Include an item ONLY if the user's clarification indicates its condition applies.
+- The user may answer by number, by code, with "all", or with "none" — interpret accordingly.
+- Preserve each item's article_number (null means retrieve the whole legislation)."""
+
+    items_text = _json.dumps(
+        [
+            {
+                "index": i + 1,
+                "legislation_code": it.get("legislation_code"),
+                "article_number": it.get("article_number"),
+                "condition": it.get("condition", ""),
+            }
+            for i, it in enumerate(ambiguous_items)
+        ],
+        indent=2,
+    )
+
+    prompt = f"""ORIGINAL QUESTION: {query}
+
+USER CLARIFICATION:
+{user_clarification}
+
+AMBIGUOUS ITEMS:
+{items_text}
+
+Decide which items to retrieve and output JSON."""
 
     return system_msg, prompt
 

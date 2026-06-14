@@ -1,10 +1,13 @@
 import os
 import uuid
 
-# Must be set before any src import — pydantic-settings reads these at module load time
+# Must be set before any src import — pydantic-settings reads these at module load time.
+# Pinned so tests are deterministic regardless of the developer's local .env.
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key-placeholder")
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("CHROMA_PATH", "/tmp/test-chromadb")
+os.environ.setdefault("MAX_CRITIQUE_RETRIES", "2")
+os.environ.setdefault("GRAPH_K_DEPTH", "2")
 
 import pytest
 import chromadb

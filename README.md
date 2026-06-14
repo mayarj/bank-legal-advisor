@@ -6,16 +6,17 @@ Built as a portfolio project to demonstrate production-grade patterns for agenti
 
 > ⚠️ **This project is under active development.** Interfaces and the data model may still change.
 >
-> **In progress — per-article legal status propagation:** legal status is tracked per *article*
+> **In progress — per-article legal status propagation:** legal status is tracked per *article*.
 
-> ⚠️ **Known limitation — in-process state & horizontal scaling (planned fix).** 
-as a **single backend instance**. Some state still lives inside the process: the
-> LangGraph agent checkpointer is an in-memory `MemorySaver` rebuilt per request (so the
-> clarification *resume* flow does not yet persist its state durably), ChromaDB runs embedded
-> on local files, and the BM25 index is held in memory per process. These prevent running
-> multiple backend replicas behind a load balancer — and the checkpointer one affects resume
-> even on a single instance. Planned fixes: a shared **PostgresSaver** checkpointer, **Chroma in
-> server mode** via `HttpClient`, and a shared/invalidated lexical index.
+> ✅ **Horizontal scaling (implemented).** State that used to live in-process now has a shared
+> backing store, so the API can run as multiple replicas behind a load balancer:
+> - **Durable checkpointer** — agent state uses a shared **`AsyncPostgresSaver`**
+>   (`CHECKPOINTER_BACKEND=postgres`), so a clarification *resume* survives across requests,
+>   restarts, and replicas. Falls back to an in-memory saver for local dev.
+> - **Chroma in server mode** — set `CHROMA_MODE=http` to use a shared Chroma server via
+>   `HttpClient` instead of embedded on-disk files.
+> - **Self-invalidating lexical index** — the in-memory BM25 index re-checks a cheap corpus
+>   signature and reloads from the shared store when another replica changes it.
 
 ---
 
@@ -39,13 +40,13 @@ as a **single backend instance**. Some state still lives inside the process: the
 
 - **Legislation ingestion** — Upload PDF legislation files; the system parses, embeds, and indexes every article automatically.
 - **Hybrid RAG search** — Combines semantic vector search, BM25 lexical ranking, and exact keyword matching with Reciprocal Rank Fusion (RRF) for best-of-all retrieval.
-- **Legal advisor agent** — A LangGraph StateGraph that plans searches, traverses legislation relationship graphs, synthesizes cited answers, and self-critiques before responding.
+- **Legal advisor agent** — A LangGraph StateGraph that plans searches, fans out **one relationship-traversal branch per retrieved article** (parents + children), decides per-article which related documents to pull, synthesizes a cited answer, and self-critiques before responding.
 - **Loan assessment agent** — A second LangGraph agent that loads a loan application, fetches the linked customer profile (credit score, payment history, existing debt), consults the legal agent for compliance questions, and produces a structured risk assessment saved to the database.
 - **Customer profiles** — Full credit profiles with employment status, income, payment history, and credit score tracking.
-- **Human-in-the-loop** — Both agents can pause mid-run and surface a clarification question to the user via the API; the conversation resumes when the user replies.
+- **Human-in-the-loop** — Both agents can pause mid-run and surface a clarification question. The legal agent has **two** clarification points (an ambiguous query, and ambiguous relationship conditions); resume is **durable** when the Postgres checkpointer is enabled.
 - **MCP tool server** — All data operations (legislation lookup, loan CRUD, customer retrieval) are exposed as MCP tools so agents can call them without direct DB access.
-- **REST API** — FastAPI application with 16 endpoints covering ingestion, legal Q&A, loan management, and customer management.
-- **303 tests** — Unit, integration, and HTTP-level tests across all layers.
+- **REST API** — FastAPI application with 16 endpoints covering ingestion, legal Q&A, loan management, and customer management, with Swagger UI at `/docs`.
+- **324 tests** — Unit, integration, and HTTP-level tests across all layers.
 
 ---
 
@@ -82,9 +83,11 @@ as a **single backend instance**. Some state still lives inside the process: the
 
 **Legal Agent**
 ```
-plan_search → [ask_clarification?] → hybrid_search → retrieve_articles
-           → traverse_parents → evaluate_relationships → [traverse_children?]
-           → synthesize → critique → [retry synthesize?] → END
+plan_search → [clarify_query?] → hybrid_search
+   → fan-out (one branch per retrieved article):
+        get article + traverse parents & children
+        + decide which related docs to retrieve (or flag as ambiguous)
+   → [clarify_relationships?] → synthesize → critique → [retry synthesize?] → END
 ```
 
 **Loan Agent**
@@ -102,6 +105,7 @@ load_loan → fetch_customer_context → plan_assessment
 |---|---|
 | API framework | FastAPI 0.115 + Uvicorn |
 | Agent orchestration | LangGraph 0.2.70 |
+| Agent state | LangGraph checkpointer — in-memory or shared **Postgres** (`langgraph-checkpoint-postgres`, `psycopg` 3) |
 | LLM | Anthropic Claude (via `langchain-anthropic`) |
 | Tool protocol | Model Context Protocol — `fastmcp` + `langchain-mcp-adapters` |
 | Vector search | ChromaDB 0.5 (cosine similarity) |
@@ -133,6 +137,7 @@ bank-legal-advisor/
 │   │       └── customers.py      # /customers/* CRUD + payments
 │   ├── core/
 │   │   ├── config.py             # pydantic-settings (reads .env)
+│   │   ├── checkpointer.py       # shared Postgres / in-memory LangGraph saver
 │   │   ├── llm.py                # Claude LLM wrapper
 │   │   └── prompts.py            # All prompt templates
 │   ├── db/
@@ -160,13 +165,13 @@ bank-legal-advisor/
 │       └── graph.py              # Legislation relationship graph traversal
 └── tests/
     ├── test_api.py               # FastAPI HTTP-level tests (39)
-    ├── test_agent.py             # Legal agent unit tests (16)
+    ├── test_agent.py             # Legal agent unit tests (18)
     ├── test_loan_agent.py        # Loan agent unit tests (21)
-    ├── test_rag.py               # RAG + vectorstore + retriever (71)
+    ├── test_rag.py               # RAG + vectorstore + retriever (73)
     ├── test_loans.py             # Loan CRUD + MCP tools (51)
     ├── test_customers.py         # Customer CRUD + MCP tools (35)
     ├── test_mcp_tools.py         # Legal MCP tools (19)
-    └── test_ingestion.py / test_pipeline.py / test_parser.py
+    └── test_ingestion.py / test_pipeline.py / test_parser.py / test_eval_metrics.py
 ```
 
 ---
@@ -200,6 +205,25 @@ createdb bank_legal_advisor       # or use your preferred PostgreSQL client
 cp .env.example .env
 ```
 
+#### Postgres via Docker (optional)
+
+A published port keeps the connection string stable (no chasing container IPs),
+and data lives on a named volume so it survives restarts:
+
+```bash
+docker run -d --name bank-pg \
+  -p 5432:5432 \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=bank_legal_advisor \
+  -v bank_pg_data:/var/lib/postgresql \
+  --restart unless-stopped \
+  postgres
+# → DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/bank_legal_advisor
+```
+
+> The same database is reused by the Postgres checkpointer when
+> `CHECKPOINTER_BACKEND=postgres`, so it must be reachable at startup.
+
 ---
 
 ## Configuration
@@ -207,6 +231,11 @@ cp .env.example .env
 All configuration is read from `.env` (via `pydantic-settings`). Create this file from `.env.example`:
 
 ```env
+# ── Application ───────────────────────────────────────────────
+APP_NAME=Bank Legal Advisor
+APP_VERSION=1.0.0
+APP_ENV=development
+
 # ── LLM ──────────────────────────────────────────────────────
 ANTHROPIC_API_KEY=your-api-key-here
 CLAUDE_MODEL=claude-sonnet-4-6
@@ -216,10 +245,25 @@ CLAUDE_MAX_TOKENS=8096
 # ── Database ──────────────────────────────────────────────────
 DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/bank_legal_advisor
 
+# ── Agent state checkpointer (durable clarification resume) ───
+# memory   → in-process only (single instance, lost on restart)
+# postgres → shared & durable; required for resume across replicas
+CHECKPOINTER_BACKEND=memory
+# CHECKPOINT_DATABASE_URL=        # optional; defaults to DATABASE_URL
+CHECKPOINT_POOL_MAX_SIZE=10
+
 # ── Embeddings & Vector Store ─────────────────────────────────
 EMBEDDING_MODEL=all-MiniLM-L6-v2
+# embedded → local on-disk files; http → shared Chroma server (HttpClient)
+CHROMA_MODE=embedded
 CHROMA_PATH=./data/chromadb
 CHROMA_COLLECTION=legislation_articles
+CHROMA_HOST=localhost
+CHROMA_PORT=8000
+CHROMA_SSL=false
+
+# ── Lexical (BM25) index ──────────────────────────────────────
+LEXICAL_REFRESH_SECONDS=30
 
 # ── Agent tuning ──────────────────────────────────────────────
 MAX_CRITIQUE_RETRIES=2
@@ -232,8 +276,14 @@ SIMILARITY_N_RESULTS=5
 | `ANTHROPIC_API_KEY` | Your Anthropic API key | *required* |
 | `CLAUDE_MODEL` | Claude model ID | `claude-sonnet-4-6` |
 | `DATABASE_URL` | Async PostgreSQL connection string | *required* |
+| `CHECKPOINTER_BACKEND` | Agent-state store: `memory` or `postgres` (durable resume) | `memory` |
+| `CHECKPOINT_DATABASE_URL` | Optional DSN for the checkpointer | falls back to `DATABASE_URL` |
+| `CHECKPOINT_POOL_MAX_SIZE` | Max connections in the checkpointer pool | `10` |
 | `EMBEDDING_MODEL` | SentenceTransformers model name | `all-MiniLM-L6-v2` |
-| `CHROMA_PATH` | ChromaDB persistence directory | `./data/chromadb` |
+| `CHROMA_MODE` | Vector store mode: `embedded` or `http` (shared server) | `embedded` |
+| `CHROMA_PATH` | ChromaDB persistence directory (embedded mode) | `./data/chromadb` |
+| `CHROMA_HOST` / `CHROMA_PORT` / `CHROMA_SSL` | Chroma server address (http mode) | `localhost` / `8000` / `false` |
+| `LEXICAL_REFRESH_SECONDS` | How often the BM25 index re-checks the shared corpus for changes | `30` |
 | `MAX_CRITIQUE_RETRIES` | How many times the legal agent retries synthesis after a failed critique | `2` |
 | `GRAPH_K_DEPTH` | Depth for legislation relationship traversal | `2` |
 | `SIMILARITY_N_RESULTS` | Number of articles returned per search | `5` |
@@ -249,11 +299,12 @@ uvicorn src.api.main:app --reload
 ```
 
 The API will be available at `http://localhost:8000`.  
-Interactive docs: `http://localhost:8000/docs`
+Interactive docs: `http://localhost:8000/docs` (Swagger UI) — `/` redirects there.
 
 On startup the server will:
 1. Run `create_tables()` to bootstrap the database schema.
-2. Start the MCP server as a subprocess and hold the connection open for the lifetime of the app.
+2. Initialize the agent-state checkpointer (in-memory, or a shared Postgres pool when `CHECKPOINTER_BACKEND=postgres`).
+3. Start the MCP server as a subprocess and hold the connection open for the lifetime of the app.
 
 ---
 
@@ -298,7 +349,8 @@ If the agent needs clarification, it returns:
 {
   "thread_id": "d3f1a2b4-...",
   "needs_clarification": true,
-  "question": "Are you asking about commercial or residential mortgage loans?"
+  "question": "Are you asking about commercial or residential mortgage loans?",
+  "options": []
 }
 ```
 
@@ -383,7 +435,7 @@ The test suite uses:
 - **Mocked LLM calls** — no Anthropic API key needed to run tests.
 
 ```
-303 passed in ~20s
+324 passed in ~20s
 ```
 
 Test files and what they cover:
@@ -391,13 +443,14 @@ Test files and what they cover:
 | File | Layer tested | Tests |
 |---|---|---|
 | `test_api.py` | FastAPI HTTP routes | 39 |
-| `test_agent.py` | Legal agent graph | 16 |
+| `test_agent.py` | Legal agent graph | 18 |
 | `test_loan_agent.py` | Loan agent graph | 21 |
-| `test_rag.py` | RAG, BM25, hybrid search | 71 |
+| `test_rag.py` | RAG, BM25, hybrid search, lexical invalidation | 73 |
 | `test_loans.py` | Loan CRUD + MCP tools | 51 |
 | `test_customers.py` | Customer CRUD + MCP tools | 35 |
 | `test_mcp_tools.py` | Legal MCP tools | 19 |
 | `test_reconcile.py` | Article status propagation | 21 |
+| `test_eval_metrics.py` | Retrieval/eval metrics | 17 |
 | `test_ingestion.py` + others | Parser, pipeline, ingestion | 30 |
 
 ---
@@ -406,6 +459,7 @@ Test files and what they cover:
 
 This project is a portfolio demonstration. Before deploying to production the following would be required:
 
+- **Horizontal scaling** — Supported: set `CHECKPOINTER_BACKEND=postgres` and `CHROMA_MODE=http` so agent state and the vector store are shared across replicas (the BM25 index self-invalidates against the shared corpus).
 - **Authentication** — API key or JWT middleware on all endpoints (no auth is currently in place).
 - **Database migrations** — Replace `create_tables()` with Alembic versioned migrations.
 - **Secrets management** — Move `ANTHROPIC_API_KEY` and `DATABASE_URL` to a vault (e.g., AWS Secrets Manager).

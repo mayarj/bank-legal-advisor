@@ -3,7 +3,6 @@ import re
 from typing import Annotated, TypedDict
 
 from langchain_core.tools import BaseTool
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.types import interrupt
@@ -50,9 +49,9 @@ def build_loan_agent(tools: list[BaseTool], checkpointer=None):
     """Build and compile the loan assessment agent graph.
 
     Tools must come from an active mcp_client() context.
-    A MemorySaver checkpointer is used by default so the interrupt-based
-    clarification step can suspend and resume correctly.
-    Pass checkpointer=False to disable (single-shot, no human-in-the-loop).
+    Pass a shared checkpointer (e.g. AsyncPostgresSaver) so the interrupt-based
+    clarification step can suspend on one request and resume on the next.
+    Pass checkpointer=False to disable persistence (single-shot, no human-in-the-loop).
     """
     tool_map = {t.name: t for t in tools}
 
@@ -120,7 +119,9 @@ def build_loan_agent(tools: list[BaseTool], checkpointer=None):
         if not questions:
             return {"legal_context": "", "cited_articles": list(state.get("cited_articles") or [])}
 
-        legal_agent = build_legal_agent(tools)
+        # Non-interactive: this sub-agent runs unattended, so it must never pause
+        # for user clarification — ambiguous relationships are simply skipped.
+        legal_agent = build_legal_agent(tools, interactive=False)
         parts: list[str] = []
         cited: list[str] = list(state.get("cited_articles") or [])
 
@@ -219,5 +220,4 @@ def build_loan_agent(tools: list[BaseTool], checkpointer=None):
     graph.add_edge("synthesize_assessment", "save_result")
     graph.add_edge("save_result", END)
 
-    cp = MemorySaver() if checkpointer is None else checkpointer
-    return graph.compile(checkpointer=cp)
+    return graph.compile(checkpointer=checkpointer)

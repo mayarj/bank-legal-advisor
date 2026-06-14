@@ -1,3 +1,4 @@
+import time
 from dataclasses import dataclass, replace as dc_replace
 from typing import Optional
 
@@ -9,7 +10,20 @@ from src.db.schemas import Legislation
 from src.rag.embeddings import embed, embed_batch
 from src.rag.status_policy import article_baseline
 
-_client = chromadb.PersistentClient(path=settings.chroma_path)
+
+def _make_chroma_client():
+    """Embedded (on-disk) by default; a shared Chroma server in http mode so that
+    multiple backend replicas read and write the same vector store."""
+    if settings.chroma_mode.lower() == "http":
+        return chromadb.HttpClient(
+            host=settings.chroma_host,
+            port=settings.chroma_port,
+            ssl=settings.chroma_ssl,
+        )
+    return chromadb.PersistentClient(path=settings.chroma_path)
+
+
+_client = _make_chroma_client()
 _collection = _client.get_or_create_collection(
     name=settings.chroma_collection,
     metadata={"hnsw:space": "cosine"},
@@ -50,17 +64,47 @@ class SearchResult:
 
 
 class _BM25Index:
-    """In-memory BM25 index, lazily populated from ChromaDB on first query."""
+    """In-memory BM25 index, lazily populated from ChromaDB on first query.
+
+    The vector store is the shared source of truth. Because the index lives in
+    each process, it periodically re-checks a cheap signature (the shared
+    collection's document count) and reloads when another replica has changed the
+    corpus — so writes made by one instance become visible to the others without
+    a restart. Writers in *this* process also call ``invalidate()`` directly for
+    immediate refresh (which additionally picks up metadata-only changes such as
+    status flips that do not alter the document count)."""
 
     def __init__(self) -> None:
         self._entries: list[tuple[str, str, dict]] = []  # (id, content, metadata)
         self._bm25: BM25Okapi | None = None
         self._loaded = False
+        self._signature: int | None = None  # corpus signature the index was built from
+        self._last_check = 0.0               # monotonic time of the last staleness probe
+
+    def _current_signature(self) -> int | None:
+        try:
+            return _collection.count()
+        except Exception:
+            return self._signature  # probe failed — assume unchanged
+
+    def _maybe_refresh(self) -> None:
+        """Reload from the shared store when the corpus has changed elsewhere.
+        Throttled to at most once per ``lexical_refresh_seconds``; negative disables."""
+        ttl = settings.lexical_refresh_seconds
+        if ttl < 0:
+            return
+        now = time.monotonic()
+        if (now - self._last_check) < ttl:
+            return
+        self._last_check = now
+        if self._current_signature() != self._signature:
+            self._load_from_chroma()
 
     def _ensure_ready(self) -> None:
         if not self._loaded:
             self._load_from_chroma()
-            self._loaded = True
+        else:
+            self._maybe_refresh()
         if self._bm25 is None and self._entries:
             self._rebuild()
 
@@ -70,10 +114,22 @@ class _BM25Index:
             (aid, doc, meta)
             for aid, doc, meta in zip(result["ids"], result["documents"], result["metadatas"])
         ]
+        self._signature = len(self._entries)
+        self._loaded = True
+        self._last_check = time.monotonic()
+        self._bm25 = None  # force rebuild against the freshly loaded corpus
 
     def _rebuild(self) -> None:
         corpus = [content.lower().split() for _, content, _ in self._entries]
         self._bm25 = BM25Okapi(corpus)
+
+    def invalidate(self) -> None:
+        """Force a reload from the shared store on the next query (used by writers
+        in this process to reflect their changes immediately)."""
+        self._signature = None
+        self._last_check = 0.0
+        if self._loaded:
+            self._load_from_chroma()
 
     def add(self, ids: list[str], documents: list[str], metadatas: list[dict]) -> None:
         if not self._loaded:
@@ -86,6 +142,7 @@ class _BM25Index:
         ]
         if new_entries:
             self._entries.extend(new_entries)
+            self._signature = len(self._entries)  # keep signature in step with the local add
             self._bm25 = None  # mark for rebuild on next search
 
     def update_metadata(self, article_id: str, metadata: dict) -> None:
@@ -123,6 +180,13 @@ class _BM25Index:
 
 
 _bm25_index = _BM25Index()
+
+
+def invalidate_lexical_index() -> None:
+    """Drop the in-process BM25 cache so the next search reloads from the shared
+    vector store. Call after writes that this process cannot incrementally apply
+    (e.g. deletions)."""
+    _bm25_index.invalidate()
 
 
 def add_legislation(legislation: Legislation) -> None:
@@ -344,3 +408,4 @@ def get_legislation(legislation_code: str) -> Optional[LegislationResult]:
 
 def delete_legislation(legislation_code: str) -> None:
     _collection.delete(where={"legislation_code": legislation_code})
+    _bm25_index.invalidate()  # removed documents must drop out of the lexical index

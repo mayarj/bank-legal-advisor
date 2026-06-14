@@ -53,8 +53,8 @@ def tools_and_map():
     )
     tool_map["get_article_data"].invoke.return_value = ARTICLE_TEXT
     tool_map["get_legislation_data"].invoke.return_value = "Full legislation content."
-    # Returns the sentinel that makes traverse_parents skip adding to parent_sections,
-    # so evaluate_relationships never calls invoke (short-circuits to needs_children=False)
+    # Returns the sentinel so relate_article finds no relationships and skips the
+    # per-article decision LLM call (no extra invoke beyond plan/synthesize/critique).
     tool_map["get_relationship_map"].ainvoke = AsyncMock(
         return_value="No related legislation found."
     )
@@ -244,49 +244,113 @@ class TestAgentPlanFallback:
         assert call_kwargs["query"] == "loan requirements"
 
 
-# ── With parent relationships ─────────────────────────────────────────────────
+# ── With relationships (per-article fan-out) ──────────────────────────────────
 
-class TestAgentWithParents:
+class TestAgentWithRelationships:
 
     @patch("src.agents.legal_agent.invoke")
-    async def test_evaluate_relationships_retrieves_flagged_legislation(
+    async def test_clearly_applicable_relationship_is_retrieved(
         self, mock_invoke, tools_and_map
     ):
         tools, tool_map = tools_and_map
         tool_map["get_relationship_map"].ainvoke = AsyncMock(
             return_value="LAW-12-2010 amends this article — always applies"
         )
-        evaluate_json = json.dumps({
-            "legislations_to_retrieve": ["LAW-12-2010"],
-            "needs_children": False,
-            "reasoning": "directly relevant",
+        decision_json = json.dumps({
+            "retrieve": [{"legislation_code": "LAW-12-2010", "article_number": None}],
+            "ambiguous": [],
+            "reasoning": "condition always applies",
         })
-        mock_invoke.side_effect = [VALID_PLAN_JSON, evaluate_json, "Answer.", CRITIQUE_PASS_JSON]
+        mock_invoke.side_effect = [VALID_PLAN_JSON, decision_json, "Answer.", CRITIQUE_PASS_JSON]
         agent = build_legal_agent(tools)
 
         await agent.ainvoke({"query": "loan requirements", "messages": []})
 
+        # article_number is null → whole legislation pulled via get_legislation_data
         tool_map["get_legislation_data"].invoke.assert_called_once_with(
             {"legislation_code": "LAW-12-2010"}
         )
 
     @patch("src.agents.legal_agent.invoke")
-    async def test_traverse_children_called_when_needs_children_true(
+    async def test_each_article_traverses_both_directions(
         self, mock_invoke, tools_and_map
     ):
         tools, tool_map = tools_and_map
         tool_map["get_relationship_map"].ainvoke = AsyncMock(
             return_value="LAW-01-1990 is an implementing regulation"
         )
-        evaluate_json = json.dumps({
-            "legislations_to_retrieve": [],
-            "needs_children": True,
-            "reasoning": "implementing regulations exist",
-        })
-        mock_invoke.side_effect = [VALID_PLAN_JSON, evaluate_json, "Answer.", CRITIQUE_PASS_JSON]
+        decision_json = json.dumps({"retrieve": [], "ambiguous": [], "reasoning": "none apply"})
+        mock_invoke.side_effect = [VALID_PLAN_JSON, decision_json, "Answer.", CRITIQUE_PASS_JSON]
         agent = build_legal_agent(tools)
 
         await agent.ainvoke({"query": "loan requirements", "messages": []})
 
-        # traverse_parents calls it once, traverse_children calls it again
+        # One reference article → relationship map fetched twice: parents and children
         assert tool_map["get_relationship_map"].ainvoke.call_count == 2
+        parent_flags = sorted(
+            call.args[0]["parents"] if call.args else call.kwargs["parents"]
+            for call in tool_map["get_relationship_map"].ainvoke.call_args_list
+        )
+        assert parent_flags == [False, True]
+
+    @patch("src.agents.legal_agent.invoke")
+    async def test_ambiguous_relationship_pauses_for_clarification(
+        self, mock_invoke, tools_and_map
+    ):
+        from langgraph.checkpoint.memory import MemorySaver
+
+        tools, tool_map = tools_and_map
+        tool_map["get_relationship_map"].ainvoke = AsyncMock(
+            return_value="LAW-99-2020 applies only to consumer loans"
+        )
+        decision_json = json.dumps({
+            "retrieve": [],
+            "ambiguous": [{
+                "legislation_code": "LAW-99-2020",
+                "article_number": None,
+                "condition": "applies only to consumer loans",
+                "question": "Is this a consumer loan?",
+            }],
+            "reasoning": "depends on loan type",
+        })
+        # plan, per-article decision — then the graph should pause before synthesis
+        mock_invoke.side_effect = [VALID_PLAN_JSON, decision_json]
+        agent = build_legal_agent(tools, checkpointer=MemorySaver())
+        config = {"configurable": {"thread_id": "t1"}}
+
+        result = await agent.ainvoke({"query": "loan requirements", "messages": []}, config=config)
+
+        # Paused at the relationship clarification gate — no answer yet
+        assert not result.get("draft_answer")
+        snapshot = await agent.aget_state(config)
+        interrupts = [i for task in snapshot.tasks for i in getattr(task, "interrupts", [])]
+        assert interrupts, "expected the agent to interrupt for clarification"
+        assert "LAW-99-2020" in interrupts[0].value["message"]
+
+    @patch("src.agents.legal_agent.invoke")
+    async def test_non_interactive_never_pauses_on_ambiguity(
+        self, mock_invoke, tools_and_map
+    ):
+        """Unattended mode (used by the loan agent) must run to completion without
+        an interrupt, even when relationship conditions are ambiguous."""
+        tools, tool_map = tools_and_map
+        tool_map["get_relationship_map"].ainvoke = AsyncMock(
+            return_value="LAW-99-2020 applies only to consumer loans"
+        )
+        decision_json = json.dumps({
+            "retrieve": [],
+            "ambiguous": [{
+                "legislation_code": "LAW-99-2020",
+                "article_number": None,
+                "condition": "applies only to consumer loans",
+                "question": "Is this a consumer loan?",
+            }],
+            "reasoning": "depends on loan type",
+        })
+        mock_invoke.side_effect = [VALID_PLAN_JSON, decision_json, "Answer.", CRITIQUE_PASS_JSON]
+        # No checkpointer — an interrupt here would raise.
+        agent = build_legal_agent(tools, interactive=False)
+
+        result = await agent.ainvoke({"query": "loan requirements", "messages": []})
+
+        assert result["draft_answer"] == "Answer."

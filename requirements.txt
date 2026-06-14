@@ -9,6 +9,10 @@ langchain==0.3.14
 langchain-community==0.3.14
 langchain-mcp-adapters==0.2.2
 
+# Durable agent-state checkpointer (shared across replicas)
+langgraph-checkpoint-postgres==2.0.21
+psycopg[binary,pool]==3.3.4
+
 # LLM (Claude API)
 anthropic==0.45.0
 langchain-anthropic==0.3.4

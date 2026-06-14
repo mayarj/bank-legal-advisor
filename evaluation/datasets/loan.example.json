@@ -1,0 +1,7 @@
+{
+  "_comment": "Loan agent ground truth. Each case references a loan_id that already exists in the database, plus the expected risk level (low | medium | high). Running this calls the real loan agent (needs ANTHROPIC_API_KEY + populated DB).",
+  "cases": [
+    {"loan_id": "00000000-0000-0000-0000-000000000001", "expected_risk": "low"},
+    {"loan_id": "00000000-0000-0000-0000-000000000002", "expected_risk": "high"}
+  ]
+}

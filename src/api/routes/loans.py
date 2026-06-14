@@ -6,7 +6,7 @@ from langchain_core.tools import BaseTool
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agents.loan_agent import build_loan_agent
-from src.api.deps import get_db, get_tools
+from src.api.deps import get_checkpointer, get_db, get_tools
 from src.api.schemas import (
     AssessLoanRequest,
     AssessLoanResponse,
@@ -95,12 +95,13 @@ async def assess_loan_endpoint(
     body: AssessLoanRequest = AssessLoanRequest(),
     tools: list[BaseTool] = Depends(get_tools),
     session: AsyncSession = Depends(get_db),
+    checkpointer=Depends(get_checkpointer),
 ):
     loan = await get_loan(session, uuid.UUID(loan_id))
     if loan is None:
         raise HTTPException(status_code=404, detail=f"Loan {loan_id} not found.")
 
-    agent = build_loan_agent(tools)
+    agent = build_loan_agent(tools, checkpointer=checkpointer)
     tid = body.thread_id or str(uuid.uuid4())
     config = {"configurable": {"thread_id": tid}}
 

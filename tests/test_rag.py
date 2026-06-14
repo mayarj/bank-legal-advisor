@@ -139,6 +139,46 @@ class TestVectorstore:
         assert test_collection.count() == 0
 
 
+# ── Lexical (BM25) index invalidation ─────────────────────────────────────────
+
+class TestLexicalIndexInvalidation:
+
+    def test_deleted_legislation_drops_out_of_bm25(self, test_collection, sample_legislation):
+        add_legislation(sample_legislation)
+        assert bm25_search("collateral", n_results=5)  # present after ingest
+
+        delete_legislation(sample_legislation.code)     # invalidates the lexical cache
+
+        assert bm25_search("collateral", n_results=5) == []
+
+    def test_bm25_reloads_when_shared_corpus_changes_externally(
+        self, test_collection, sample_legislation, monkeypatch
+    ):
+        """Simulate another replica writing to the shared store: the in-process BM25
+        index must detect the changed corpus signature and reload."""
+        from src.rag import vectorstore
+
+        monkeypatch.setattr(vectorstore.settings, "lexical_refresh_seconds", 0.0)
+        add_legislation(sample_legislation)
+        bm25_search("collateral", n_results=5)  # warm + load the index
+
+        # Direct upsert bypasses this process's incremental add() — i.e. a peer replica.
+        doc = "Unique zebra quokka provision governing exotic collateral."
+        test_collection.upsert(
+            ids=["EXT-1_article_1"],
+            documents=[doc],
+            embeddings=[vectorstore.embed(doc)],
+            metadatas=[{
+                "legislation_code": "EXT-1", "article_number": "1",
+                "status": "active", "is_in_force": True,
+                "issuer": "External", "subject": "external", "date": "2020-01-01",
+            }],
+        )
+
+        results = bm25_search("zebra quokka", n_results=5)
+        assert any(r.legislation_code == "EXT-1" for r in results)
+
+
 # ── Direct lookup ─────────────────────────────────────────────────────────────
 
 class TestGetArticle:

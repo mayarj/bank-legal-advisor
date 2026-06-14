@@ -1,0 +1,20 @@
+{
+  "_comment": "Retrieval ground truth. 'relevant' lists the articles a domain expert confirms are correct for the query. Copy this file to retrieval.json and fill in your own data.",
+  "queries": [
+    {
+      "id": "collateral-threshold",
+      "query": "What collateral is required for loans over 50,000?",
+      "relevant": [
+        {"legislation_code": "LAW-88-2003", "article_number": "2"},
+        {"legislation_code": "LAW-88-2003", "article_number": "1"}
+      ]
+    },
+    {
+      "id": "small-personal-loan",
+      "query": "Can a small personal loan be issued without collateral?",
+      "relevant": [
+        {"legislation_code": "LAW-88-2003", "article_number": "3"}
+      ]
+    }
+  ]
+}

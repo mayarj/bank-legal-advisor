@@ -12,9 +12,13 @@ from src.rag.vectorstore import add_legislation
 
 
 async def run_pipeline(file_path: str, session: AsyncSession) -> Legislation | None:
-    text = parse_pdf(file_path)
+    """Ingest legislation from a PDF file."""
+    return await run_pipeline_from_text(parse_pdf(file_path), session)
 
-    if not text:
+
+async def run_pipeline_from_text(text: str, session: AsyncSession) -> Legislation | None:
+    """Ingest legislation from raw text (e.g. an uploaded .txt file)."""
+    if not text or not text.strip():
         return None
 
     legislation = run_ingestion_workflow(text)

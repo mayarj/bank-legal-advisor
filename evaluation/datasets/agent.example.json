@@ -1,0 +1,19 @@
+{
+  "_comment": "Legal agent ground truth. 'expected_citations' lists the articles the answer SHOULD cite. Copy to agent.json and fill in. Running this calls the real legal agent (needs ANTHROPIC_API_KEY).",
+  "queries": [
+    {
+      "id": "mortgage-collateral",
+      "query": "What collateral is required for a mortgage loan exceeding 500,000?",
+      "expected_citations": [
+        {"legislation_code": "LAW-88-2003", "article_number": "2"}
+      ]
+    },
+    {
+      "id": "no-collateral-personal",
+      "query": "Are there cases where a loan can be granted with no collateral?",
+      "expected_citations": [
+        {"legislation_code": "LAW-88-2003", "article_number": "3"}
+      ]
+    }
+  ]
+}
